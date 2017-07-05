@@ -1,0 +1,38 @@
+From 7e483e3df00ef9cb67b7607621e17621691c6555 Mon Sep 17 00:00:00 2001
+From: Jerry Jelinek <jerry.jelinek@joyent.com>
+Date: Thu, 1 May 2014 13:16:32 +0000
+Subject: [PATCH 14/22] OS-2971 support for dynamic setting of memory cap
+ tuables
+
+---
+ usr/src/cmd/zoneadmd/mcap.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/usr/src/cmd/zoneadmd/mcap.c b/usr/src/cmd/zoneadmd/mcap.c
+index 63e3195..e866cc0 100644
+--- a/usr/src/cmd/zoneadmd/mcap.c
++++ b/usr/src/cmd/zoneadmd/mcap.c
+@@ -161,6 +161,7 @@ static boolean_t skip_pageout = B_FALSE;
+ static boolean_t skip_pf_throttle = B_FALSE;
+ 
+ static int64_t check_suspend();
++static void get_mcap_tunables();
+ 
+ /*
+  * Structure to hold current state about a process address space that we're
+@@ -942,6 +943,12 @@ check_suspend()
+ 			hi_thresh = (uint64_t)(zone_rss_cap * .9);
+ 			addon = (uint64_t)(zone_rss_cap * 0.05);
+ 
++			/*
++			 * We allow the memory cap tunables to be changed on
++			 * the fly.
++			 */
++			get_mcap_tunables();
++
+ 			debug("%s: %s\n", TUNE_CMD, over_cmd);
+ 			debug("%s: %d\n", TUNE_NVMU, skip_vmusage);
+ 			debug("%s: %d\n", TUNE_NPAGE, skip_pageout);
+-- 
+2.8.0
+

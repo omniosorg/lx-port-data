@@ -1,0 +1,29 @@
+From ef3612a66f49e7d757bac3072d7ac8dead365732 Mon Sep 17 00:00:00 2001
+From: Jerry Jelinek <jerry.jelinek@joyent.com>
+Date: Fri, 2 May 2014 13:38:06 +0000
+Subject: [PATCH 16/22] OS-2975 zone memory capper should set PR_RLC when
+ controlling a process
+
+---
+ usr/src/cmd/zoneadmd/mcap.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/usr/src/cmd/zoneadmd/mcap.c b/usr/src/cmd/zoneadmd/mcap.c
+index cff1f7d..f841e63 100644
+--- a/usr/src/cmd/zoneadmd/mcap.c
++++ b/usr/src/cmd/zoneadmd/mcap.c
+@@ -302,6 +302,11 @@ control_proc(pid_t pid)
+ 	if ((ph = Pgrab(pid, 0, &res)) == NULL)
+ 		return (NULL);
+ 
++	if (Psetflags(ph, PR_RLC) != 0) {
++		(void) Prelease(ph, 0);
++		return (NULL);
++	}
++
+ 	if (Pcreate_agent(ph) != 0) {
+ 		(void) Prelease(ph, 0);
+ 		return (NULL);
+-- 
+2.8.0
+

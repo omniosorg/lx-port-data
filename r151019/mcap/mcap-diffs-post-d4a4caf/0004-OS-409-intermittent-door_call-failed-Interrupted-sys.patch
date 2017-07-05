@@ -1,0 +1,27 @@
+From da7c6c678e9802fb479bb1b4ec346835a76f2746 Mon Sep 17 00:00:00 2001
+From: Jerry Jelinek <jerry.jelinek@joyent.com>
+Date: Fri, 13 May 2011 07:23:28 -0700
+Subject: [PATCH 04/22] OS-409 intermittent door_call failed: Interrupted
+ system call errors from zoneadmd
+
+---
+ usr/src/cmd/zoneadmd/mcap.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/usr/src/cmd/zoneadmd/mcap.c b/usr/src/cmd/zoneadmd/mcap.c
+index 6fe391b..db6ce68 100644
+--- a/usr/src/cmd/zoneadmd/mcap.c
++++ b/usr/src/cmd/zoneadmd/mcap.c
+@@ -915,7 +915,8 @@ mcap_zone()
+ 		rewinddir(pdir);
+ 	}
+ 
+-	(void) closedir(pdir);
++	if (pdir != NULL)
++		(void) closedir(pdir);
+ 	debug("thread shutdown\n");
+ }
+ 
+-- 
+2.8.0
+

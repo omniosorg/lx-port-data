@@ -1,0 +1,27 @@
+From 2b1fce1b49ae9be244383a474422e242cc4f5d30 Mon Sep 17 00:00:00 2001
+From: Jerry Jelinek <jerry.jelinek@joyent.com>
+Date: Thu, 1 May 2014 13:37:33 +0000
+Subject: [PATCH 15/22] OS-2972 memory capper should sleep longer when skipping
+ pageout
+
+---
+ usr/src/cmd/zoneadmd/mcap.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/usr/src/cmd/zoneadmd/mcap.c b/usr/src/cmd/zoneadmd/mcap.c
+index e866cc0..cff1f7d 100644
+--- a/usr/src/cmd/zoneadmd/mcap.c
++++ b/usr/src/cmd/zoneadmd/mcap.c
+@@ -1257,6 +1257,9 @@ mcap_zone()
+ 
+ 		debug("process pass done; excess %lld\n", (long long)excess);
+ 		rewinddir(pdir);
++
++		if (skip_pageout)
++			(void) sleep_shutdown(120);
+ 	}
+ 
+ 	if (pdir != NULL)
+-- 
+2.8.0
+

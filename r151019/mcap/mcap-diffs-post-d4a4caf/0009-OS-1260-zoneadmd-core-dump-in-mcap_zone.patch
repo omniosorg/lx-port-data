@@ -1,0 +1,25 @@
+From bef0cb044d24ec8f21ce4110a1de774e2530da01 Mon Sep 17 00:00:00 2001
+From: Jerry Jelinek <jerry.jelinek@joyent.com>
+Date: Fri, 8 Jun 2012 12:36:04 +0000
+Subject: [PATCH 09/22] OS-1260 zoneadmd core dump in mcap_zone()
+
+---
+ usr/src/cmd/zoneadmd/mcap.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/usr/src/cmd/zoneadmd/mcap.c b/usr/src/cmd/zoneadmd/mcap.c
+index 2184067..e0c2683 100644
+--- a/usr/src/cmd/zoneadmd/mcap.c
++++ b/usr/src/cmd/zoneadmd/mcap.c
+@@ -432,6 +432,8 @@ pageout_process(pid_t pid, int64_t excess)
+ 	if ((psfd = open(pathbuf, O_RDONLY, 0000)) < 0)
+ 		return (excess);
+ 
++	cur.pr_xmapp = NULL;
++
+ 	if (pread(psfd, &psinfo, sizeof (psinfo), 0) != sizeof (psinfo))
+ 		goto done;
+ 
+-- 
+2.8.0
+

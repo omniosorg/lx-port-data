@@ -1,0 +1,819 @@
+From f5a9e2850fe18f275f66d62091e8ef5ddb5f48d7 Mon Sep 17 00:00:00 2001
+From: Jerry Jelinek <jerry.jelinek@joyent.com>
+Date: Tue, 24 Jan 2012 21:57:33 +0000
+Subject: [PATCH 07/22] OS-881 To workaround OS-580 add support to only
+ invalidate mappings from a single process
+
+---
+ usr/src/cmd/rcap/rcapd/rcapd_scanner.c |   3 +-
+ usr/src/cmd/truss/print.c              |   7 +-
+ usr/src/cmd/zoneadmd/mcap.c            | 183 +++++++++++++++------------------
+ usr/src/uts/common/sys/buf.h           |   8 ++
+ usr/src/uts/common/sys/mman.h          |   1 +
+ usr/src/uts/common/syscall/memcntl.c   |   8 +-
+ usr/src/uts/common/vm/hat.h            |   2 +
+ usr/src/uts/common/vm/seg_vn.c         |  11 +-
+ usr/src/uts/common/vm/vm_pvn.c         |  28 +++--
+ usr/src/uts/common/vm/vm_usage.c       |  16 ++-
+ usr/src/uts/i86pc/vm/hat_i86.c         |  44 ++++++--
+ 11 files changed, 186 insertions(+), 125 deletions(-)
+
+diff --git a/usr/src/cmd/rcap/rcapd/rcapd_scanner.c b/usr/src/cmd/rcap/rcapd/rcapd_scanner.c
+index b39811b..254bb9e 100644
+--- a/usr/src/cmd/rcap/rcapd/rcapd_scanner.c
++++ b/usr/src/cmd/rcap/rcapd/rcapd_scanner.c
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
++ * Copyright 2012 Joyent, Inc.  All rights reserved.
+  */
+ 
+ #pragma ident	"%Z%%M%	%I%	%E% SMI"
+@@ -551,7 +552,7 @@ pageout(pid_t pid, struct ps_prochandle *Pr, caddr_t start, caddr_t end)
+ 
+ 	errno = 0;
+ 	res = pr_memcntl(Pr, start, (end - start), MC_SYNC,
+-	    (caddr_t)(MS_ASYNC | MS_INVALIDATE), 0, 0);
++	    (caddr_t)(MS_ASYNC | MS_INVALCURPROC), 0, 0);
+ 	debug_high("pr_memcntl [%p-%p): %d", (void *)start, (void *)end, res);
+ 
+ 	/*
+diff --git a/usr/src/cmd/truss/print.c b/usr/src/cmd/truss/print.c
+index 906d8d2..0abcfdf 100644
+--- a/usr/src/cmd/truss/print.c
++++ b/usr/src/cmd/truss/print.c
+@@ -873,7 +873,9 @@ prt_mc4(private_t *pri, int raw, long val) /* print memcntl() (4th) argument */
+ 			return;
+ 
+ 		case MC_SYNC:
+-			if ((val & ~(MS_SYNC|MS_ASYNC|MS_INVALIDATE)) == 0) {
++			if ((val &
++			    ~(MS_SYNC|MS_ASYNC|MS_INVALIDATE|MS_INVALCURPROC))
++			    == 0) {
+ 				*(s = pri->code_buf) = '\0';
+ 				if (val & MS_SYNC)
+ 					(void) strlcat(s, "|MS_SYNC", CBSIZE);
+@@ -882,6 +884,9 @@ prt_mc4(private_t *pri, int raw, long val) /* print memcntl() (4th) argument */
+ 				if (val & MS_INVALIDATE)
+ 					(void) strlcat(s, "|MS_INVALIDATE",
+ 					    CBSIZE);
++				if (val & MS_INVALCURPROC)
++					(void) strlcat(s, "|MS_INVALCURPROC",
++					    CBSIZE);
+ 			}
+ 			break;
+ 
+diff --git a/usr/src/cmd/zoneadmd/mcap.c b/usr/src/cmd/zoneadmd/mcap.c
+index 9e0fba6..d52eec9 100644
+--- a/usr/src/cmd/zoneadmd/mcap.c
++++ b/usr/src/cmd/zoneadmd/mcap.c
+@@ -40,7 +40,7 @@
+  * checks that against the zone's zone.max-physical-memory rctl.  Once the
+  * zone goes over its cap, then this thread will work through the zone's
+  * /proc process list, Pgrab-bing each process and stepping through the
+- * address space segments attempting to use pr_memcntl(...MS_INVALIDATE...)
++ * address space segments attempting to use pr_memcntl(...MS_INVALCURPROC...)
+  * to pageout pages, until the zone is again under its cap.
+  *
+  * Although zone memory capping is implemented as a soft cap by this user-level
+@@ -56,21 +56,14 @@
+  * the thread will work to pageout until the zone is under the cap, as shown
+  * by updated vm_usage data.
+  *
+- * There are a couple of interfaces (xmap, pagedata) in proc(4) that can be
+- * used to examine a processes mapped segments while we are trying to pageout.
+- * The observed xmap segement size data is frequently smaller than the
+- * pagedata segement size data, so it is less effective in practice.  Thus we
+- * use pagedata to determine the size of each segment.
+- *
+- * The pagedata page maps (at least on x86) are not useful.  Those flags
++ * NOTE: The pagedata page maps (at least on x86) are not useful.  Those flags
+  * are set by hrm_setbits() and on x86 that code path is only executed by
+  *     segvn_pagelock -> hat_setstat -> hrm_setbits
+  *     segvn_softunlock -^
+  * On SPARC there is an additional code path which may make this data
+  * useful (sfmmu_ttesync), but since it is not generic, we ignore the page
+- * maps and only use the segement info from pagedata.  If we ever fix this
+- * issue, then we could generalize this mcap code to do more with the data on
+- * active pages.
++ * maps.  If we ever fix this issue, then we could generalize this mcap code to
++ * do more with the data on active pages.
+  *
+  * For debugging, touch the file {zonepath}/mcap_debug.log.  This will
+  * cause the thread to start logging its actions into that file (it may take
+@@ -124,7 +117,6 @@ static cond_t	shutdown_cv;
+ static int	shutting_down = 0;
+ static thread_t mcap_tid;
+ static FILE	*debug_log_fp = NULL;
+-static uint64_t	sum_pageout = 0;	/* total bytes paged out in a pass */
+ static uint64_t zone_rss_cap;		/* RSS cap(KB) */
+ static char	over_cmd[2 * BUFSIZ];	/* same size as zone_attr_value */
+ 
+@@ -135,13 +127,7 @@ static char	over_cmd[2 * BUFSIZ];	/* same size as zone_attr_value */
+ typedef struct {
+ 	int pr_curr;		/* the # of the mapping we're working on */
+ 	int pr_nmap;		/* number of mappings in address space */
+-	int pr_cnt;		/* number of mappings processed */
+-
+-	prpageheader_t *pr_pghp; /* process's complete pagedata */
+-	prasmap_t *pr_asp;	/* current address space pointer */
+-
+-	uintptr_t pr_addr;	/* base of mapping */
+-	uint64_t pr_size;	/* size of mapping */
++	prxmap_t *pr_xmapp;	/* process's xmap array */
+ } proc_map_t;
+ 
+ typedef struct zsd_vmusage64 {
+@@ -293,40 +279,21 @@ control_proc(pid_t pid)
+ }
+ 
+ /*
+- * Get data from the current prasmap_t and advance pr_asp to the next
+- * asmap in the pagedata.
++ * Get the next mapping.
+  */
+-static uintptr_t
++static prxmap_t *
+ nextmapping(proc_map_t *pmp)
+ {
+-	prasmap_t *pap;
+-	void *pdp;		/* per-page data pointer */
+-
+-	pmp->pr_curr++;
+-	if (pmp->pr_curr > pmp->pr_nmap)
++	if (pmp->pr_xmapp == NULL || pmp->pr_curr >= pmp->pr_nmap)
+ 		return (NULL);
+ 
+-	pap = pmp->pr_asp;
+-
+-	pmp->pr_addr = pap->pr_vaddr;
+-	pmp->pr_size = pap->pr_npage * pap->pr_pagesize;
+-	pmp->pr_cnt++;
+-
+-	/* Advance the pr_asp pointer to the next asmap */
+-	pdp = pap + 1;
+-	pdp = (caddr_t)(uintptr_t)((uintptr_t)pdp + pap->pr_npage);
+-
+-	/* Skip to next 64-bit-aligned address to get the next prasmap_t. */
+-	pdp = (caddr_t)(((uintptr_t)pdp + 7) & ~7);
+-	pmp->pr_asp = (prasmap_t *)pdp;
+-
+-	return (pmp->pr_addr);
++	return (&pmp->pr_xmapp[pmp->pr_curr++]);
+ }
+ 
+ /*
+  * Initialize the proc_map_t to access the first mapping of an address space.
+  */
+-static void *
++static prxmap_t *
+ init_map(proc_map_t *pmp, pid_t pid)
+ {
+ 	int fd;
+@@ -337,39 +304,37 @@ init_map(proc_map_t *pmp, pid_t pid)
+ 	bzero(pmp, sizeof (proc_map_t));
+ 	pmp->pr_nmap = -1;
+ 
+-	(void) snprintf(pathbuf, sizeof (pathbuf), "%s/%d/pagedata", zoneproc,
+-	    pid);
++	(void) snprintf(pathbuf, sizeof (pathbuf), "%s/%d/xmap", zoneproc, pid);
+ 	if ((fd = open(pathbuf, O_RDONLY, 0)) < 0)
+ 		return (NULL);
+ 
+ redo:
+ 	errno = 0;
+ 	if (fstat(fd, &st) != 0)
+-		return (NULL);
++		goto done;
+ 
+-	if ((pmp->pr_pghp = malloc(st.st_size)) == NULL) {
+-		debug("cannot malloc() %ld bytes for pagedata", st.st_size);
+-		return (NULL);
++	if ((pmp->pr_xmapp = malloc(st.st_size)) == NULL) {
++		debug("cannot malloc() %ld bytes for xmap", st.st_size);
++		goto done;
+ 	}
+-	(void) bzero(pmp->pr_pghp, st.st_size);
++	(void) bzero(pmp->pr_xmapp, st.st_size);
+ 
+ 	errno = 0;
+-	if ((res = read(fd, pmp->pr_pghp, st.st_size)) != st.st_size) {
+-		free(pmp->pr_pghp);
+-		pmp->pr_pghp = NULL;
++	if ((res = read(fd, pmp->pr_xmapp, st.st_size)) != st.st_size) {
++		free(pmp->pr_xmapp);
++		pmp->pr_xmapp = NULL;
+ 		if (res > 0 || errno == E2BIG) {
+ 			goto redo;
+ 		} else {
+-			debug("pid %ld cannot read pagedata\n", pid);
+-			return (NULL);
++			debug("pid %ld cannot read xmap\n", pid);
++			goto done;
+ 		}
+ 	}
+ 
+-	pmp->pr_nmap = pmp->pr_pghp->pr_nmap;
+-	pmp->pr_asp = (prasmap_t *)(pmp->pr_pghp + 1);
++	pmp->pr_nmap = st.st_size / sizeof (prxmap_t);
+ done:
+ 	(void) close(fd);
+-	return ((void *)nextmapping(pmp));
++	return (nextmapping(pmp));
+ }
+ 
+ /*
+@@ -377,13 +342,24 @@ done:
+  * return nonzero if not all of the pages may are pageable, for any reason.
+  */
+ static int
+-pageout_mapping(struct ps_prochandle *Pr, proc_map_t *pmp)
++pageout_mapping(struct ps_prochandle *Pr, prxmap_t *pmp)
+ {
+ 	int res;
+ 
++	/*
++	 * We particularly want to avoid the pr_memcntl on anonymous mappings
++	 * which show 0 since that will pull them back off of the free list
++	 * and increase the zone's RSS, even though the process itself has
++	 * them freed up.
++	 */
++	if (pmp->pr_mflags & MA_ANON && pmp->pr_anon == 0)
++		return (0);
++	else if (pmp->pr_mflags & MA_ISM || pmp->pr_mflags & MA_SHM)
++		return (0);
++
+ 	errno = 0;
+-	res = pr_memcntl(Pr, (caddr_t)pmp->pr_addr, pmp->pr_size, MC_SYNC,
+-	    (caddr_t)(MS_ASYNC | MS_INVALIDATE), 0, 0);
++	res = pr_memcntl(Pr, (caddr_t)pmp->pr_vaddr, pmp->pr_size, MC_SYNC,
++	    (caddr_t)(MS_ASYNC | MS_INVALCURPROC), 0, 0);
+ 
+ 	/*
+ 	 * EBUSY indicates none of the pages have backing store allocated, or
+@@ -423,7 +399,7 @@ static int64_t
+ pageout_process(pid_t pid, int64_t excess)
+ {
+ 	int			psfd;
+-	void			*praddr;
++	prxmap_t		*pxmap;
+ 	proc_map_t		cur;
+ 	struct ps_prochandle	*ph = NULL;
+ 	int			unpageable_mappings;
+@@ -433,7 +409,6 @@ pageout_process(pid_t pid, int64_t excess)
+ 	int			incr_rss_check = 0;
+ 	char			pathbuf[MAXPATHLEN];
+ 
+-	cur.pr_pghp = NULL;
+ 	(void) snprintf(pathbuf, sizeof (pathbuf), "%s/%d/psinfo", zoneproc,
+ 	    pid);
+ 	if ((psfd = open(pathbuf, O_RDONLY, 0000)) < 0)
+@@ -459,11 +434,11 @@ pageout_process(pid_t pid, int64_t excess)
+ 	}
+ 
+ 	/* Get segment residency information. */
+-	praddr = init_map(&cur, pid);
++	pxmap = init_map(&cur, pid);
+ 
+ 	/* Skip process if it has no mappings. */
+-	if (cur.pr_pghp == NULL) {
+-		debug("%ld: pagedata unreadable; ignoring\n", pid);
++	if (pxmap == NULL) {
++		debug("%ld: xmap unreadable; ignoring\n", pid);
+ 		goto done;
+ 	}
+ 
+@@ -489,15 +464,15 @@ pageout_process(pid_t pid, int64_t excess)
+ 	 */
+ 	sum_att = sum_d_rss = 0;
+ 	unpageable_mappings = 0;
+-	while (excess > 0 && praddr != NULL && !shutting_down) {
++	while (excess > 0 && pxmap != NULL && !shutting_down) {
+ 		/* Try to page out the mapping. */
+-		if (pageout_mapping(ph, &cur) < 0) {
++		if (pageout_mapping(ph, pxmap) < 0) {
+ 			debug("pid %ld: exited or unpageable\n", pid);
+ 			break;
+ 		}
+ 
+ 		/* attempted is the size of the mapping */
+-		sum_att += (cur.pr_size / 1024);
++		sum_att += pxmap->pr_size / 1024;
+ 
+ 		/*
+ 		 * This processes RSS is potentially enough to clear the
+@@ -519,11 +494,10 @@ pageout_process(pid_t pid, int64_t excess)
+ 			} else {
+ 				excess += d_rss;
+ 				sum_d_rss += d_rss;
+-				sum_pageout += (-d_rss * 1024);
+ 			}
+ 		}
+ 
+-		praddr = (void *)nextmapping(&cur);
++		pxmap = nextmapping(&cur);
+ 	}
+ 
+ 	if (!incr_rss_check) {
+@@ -531,12 +505,11 @@ pageout_process(pid_t pid, int64_t excess)
+ 		if (d_rss < 0) {
+ 			excess += d_rss;
+ 			sum_d_rss += d_rss;
+-			sum_pageout += (-d_rss * 1024);
+ 		}
+ 	}
+ 
+-	debug("pid %ld: map %d unp %d att %lluKB drss %lldKB excess %lldKB\n",
+-	    pid, cur.pr_cnt, unpageable_mappings, (unsigned long long)sum_att,
++	debug("pid %ld: unp %d att %lluKB drss %lldKB excess %lldKB\n",
++	    pid, unpageable_mappings, (unsigned long long)sum_att,
+ 	    (unsigned long long)sum_d_rss, (long long)excess);
+ 
+ done:
+@@ -546,8 +519,8 @@ done:
+ 		(void) Prelease(ph, 0);
+ 	}
+ 
+-	if (cur.pr_pghp != NULL)
+-		free(cur.pr_pghp);
++	if (cur.pr_xmapp != NULL)
++		free(cur.pr_xmapp);
+ 
+ 	(void) close(psfd);
+ 
+@@ -680,12 +653,13 @@ get_zone_cap()
+  * is important considering that each zone will be monitoring its rss.
+  */
+ static int64_t
+-check_suspend(int age)
++check_suspend(int age, boolean_t new_cycle)
+ {
+ 	static hrtime_t last_cap_read = 0;
+ 	static uint64_t addon;
+ 	static uint64_t lo_thresh;	/* Thresholds for how long to  sleep */
+ 	static uint64_t hi_thresh;	/* when under the cap (80% & 90%). */
++	static uint64_t prev_zone_rss = 0;
+ 
+ 	/* Wait a second to give the async pageout a chance to catch up. */
+ 	(void) sleep_shutdown(1);
+@@ -742,16 +716,6 @@ check_suspend(int age)
+ 			continue;
+ 		}
+ 
+-		/*
+-		 * If we did some paging out since our last invocation then
+-		 * update the kstat so we can track how much was paged out.
+-		 */
+-		if (sum_pageout != 0) {
+-			(void) zone_setattr(zid, ZONE_ATTR_PMCAP_PAGEOUT,
+-			    &sum_pageout, 0);
+-			sum_pageout = 0;
+-		}
+-
+ 		zone_rss = get_mem_info(age);
+ 
+ 		/* calculate excess */
+@@ -760,18 +724,41 @@ check_suspend(int age)
+ 		debug("rss %lluKB, cap %lluKB, excess %lldKB\n",
+ 		    zone_rss, zone_rss_cap, new_excess);
+ 
++		/*
++		 * If necessary, updates stats.
++		 */
++
++		/*
++		 * If it looks like we did some paging out since last over the
++		 * cap then update the kstat so we can approximate how much was
++		 * paged out.
++		 */
++		if (prev_zone_rss > zone_rss_cap && zone_rss < prev_zone_rss) {
++			uint64_t diff;
++
++			/* assume diff is num bytes we paged out */
++			diff = (prev_zone_rss - zone_rss) * 1024;
++
++			(void) zone_setattr(zid, ZONE_ATTR_PMCAP_PAGEOUT,
++			    &diff, 0);
++		}
++		prev_zone_rss = zone_rss;
++
+ 		if (new_excess > 0) {
+-			uint64_t n = 1;
++			if (new_cycle) {
++				uint64_t n = 1;
+ 
+-			/* Increment "nover" kstat. */
+-			(void) zone_setattr(zid, ZONE_ATTR_PMCAP_NOVER, &n, 0);
++				/* Increment "nover" kstat. */
++				(void) zone_setattr(zid, ZONE_ATTR_PMCAP_NOVER,
++				    &n, 0);
++			}
+ 
+ 			/*
+-			 * Once we go over the cap, then we want to page out a
+-			 * little extra instead of stopping right at the cap.
+-			 * To do this we add 5% to the excess so that
+-			 * pageout_proces will work a little longer before
+-			 * stopping.
++			 * Once we go over the cap, then we want to
++			 * page out a little extra instead of stopping
++			 * right at the cap. To do this we add 5% to
++			 * the excess so that pageout_proces will work
++			 * a little longer before stopping.
+ 			 */
+ 			return ((int64_t)(new_excess + addon));
+ 		}
+@@ -845,7 +832,7 @@ mcap_zone()
+ 		struct dirent *dirent;
+ 
+ 		/* Wait until we've gone over the cap. */
+-		excess = check_suspend(age);
++		excess = check_suspend(age, B_TRUE);
+ 
+ 		debug("starting to scan, excess %lldk\n", (long long)excess);
+ 
+@@ -885,10 +872,10 @@ mcap_zone()
+ 			excess = pageout_process(pid, excess);
+ 
+ 			if (excess <= 0) {
+-				debug("done scanning; excess %lld\n",
++				debug("apparently under; excess %lld\n",
+ 				    (long long)excess);
+ 				/* Double check the current excess */
+-				excess = check_suspend(1);
++				excess = check_suspend(1, B_FALSE);
+ 			}
+ 		}
+ 
+diff --git a/usr/src/uts/common/sys/buf.h b/usr/src/uts/common/sys/buf.h
+index a9191ae..cb8a601 100644
+--- a/usr/src/uts/common/sys/buf.h
++++ b/usr/src/uts/common/sys/buf.h
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
++ * Copyright 2012 Joyent, Inc.  All rights reserved.
+  */
+ 
+ /*	Copyright (c) 1984, 1986, 1987, 1988, 1989 AT&T	*/
+@@ -186,6 +187,7 @@ struct biostats {
+ #define	B_STARTED	0x2000000	/* io:::start probe called for buf */
+ #define	B_ABRWRITE	0x4000000	/* Application based recovery active */
+ #define	B_PAGE_NOWAIT	0x8000000	/* Skip the page if it is locked */
++#define	B_INVALCURONLY	0x10000000	/* invalidate only for curproc */
+ 
+ /*
+  * There is some confusion over the meaning of B_FREE and B_INVAL and what
+@@ -198,6 +200,12 @@ struct biostats {
+  * between the sole use of these two flags.  In both cases, IO will be done
+  * if the page is not yet committed to storage.
+  *
++ * The B_INVALCURONLY flag modifies the behavior of the B_INVAL flag and is
++ * intended to be used in conjunction with B_INVAL.  B_INVALCURONLY has no
++ * meaning on its own.  When both B_INVALCURONLY and B_INVAL are set, then
++ * the mapping for the page is only invalidated for the current process.
++ * In this case, the page is not destroyed unless this was the final mapping.
++ *
+  * In order to discard pages without writing them back, (B_INVAL | B_TRUNC)
+  * should be used.
+  *
+diff --git a/usr/src/uts/common/sys/mman.h b/usr/src/uts/common/sys/mman.h
+index 6ec5f4f..34e491f 100644
+--- a/usr/src/uts/common/sys/mman.h
++++ b/usr/src/uts/common/sys/mman.h
+@@ -338,6 +338,7 @@ struct memcntl_mha32 {
+ #define	MS_SYNC		0x4		/* wait for msync */
+ #define	MS_ASYNC	0x1		/* return immediately */
+ #define	MS_INVALIDATE	0x2		/* invalidate caches */
++#define	MS_INVALCURPROC	0x8		/* invalidate cache for curproc only */
+ 
+ #if	(_POSIX_C_SOURCE <= 2) && !defined(_XPG4_2) || defined(__EXTENSIONS__)
+ /* functions to mctl */
+diff --git a/usr/src/uts/common/syscall/memcntl.c b/usr/src/uts/common/syscall/memcntl.c
+index 1ee4b6a..721f884 100644
+--- a/usr/src/uts/common/syscall/memcntl.c
++++ b/usr/src/uts/common/syscall/memcntl.c
+@@ -115,13 +115,17 @@ memcntl(caddr_t addr, size_t len, int cmd, caddr_t arg, int attr, int mask)
+ 		 * MS_SYNC used to be defined to be zero but is now non-zero.
+ 		 * For binary compatibility we still accept zero
+ 		 * (the absence of MS_ASYNC) to mean the same thing.
++		 * Binary compatibility is not an issue for MS_INVALCURPROC.
+ 		 */
+ 		iarg = (uintptr_t)arg;
+ 		if ((iarg & ~MS_INVALIDATE) == 0)
+ 			iarg |= MS_SYNC;
+ 
+-		if (((iarg & ~(MS_SYNC|MS_ASYNC|MS_INVALIDATE)) != 0) ||
+-		    ((iarg & (MS_SYNC|MS_ASYNC)) == (MS_SYNC|MS_ASYNC))) {
++		if (((iarg &
++		    ~(MS_SYNC|MS_ASYNC|MS_INVALIDATE|MS_INVALCURPROC)) != 0) ||
++		    ((iarg & (MS_SYNC|MS_ASYNC)) == (MS_SYNC|MS_ASYNC)) ||
++		    ((iarg & (MS_INVALIDATE|MS_INVALCURPROC)) ==
++		    (MS_INVALIDATE|MS_INVALCURPROC))) {
+ 			error = set_errno(EINVAL);
+ 		} else {
+ 			error = as_ctl(as, addr, len, cmd, attr, iarg, NULL, 0);
+diff --git a/usr/src/uts/common/vm/hat.h b/usr/src/uts/common/vm/hat.h
+index 1d91475..156b810 100644
+--- a/usr/src/uts/common/vm/hat.h
++++ b/usr/src/uts/common/vm/hat.h
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
++ * Copyright 2012 Joyent, Inc.  All rights reserved.
+  */
+ 
+ /*	Copyright (c) 1984, 1986, 1987, 1988, 1989 AT&T	*/
+@@ -460,6 +461,7 @@ void	hat_setstat(struct as *, caddr_t, size_t, uint_t);
+  */
+ #define	HAT_ADV_PGUNLOAD	0x00
+ #define	HAT_FORCE_PGUNLOAD	0x01
++#define	HAT_CURPROC_PGUNLOAD	0x02
+ 
+ /*
+  * Attributes for hat_page_*attr, hat_setstats and
+diff --git a/usr/src/uts/common/vm/seg_vn.c b/usr/src/uts/common/vm/seg_vn.c
+index 875dec7..f143c1e 100644
+--- a/usr/src/uts/common/vm/seg_vn.c
++++ b/usr/src/uts/common/vm/seg_vn.c
+@@ -7308,7 +7308,8 @@ segvn_sync(struct seg *seg, caddr_t addr, size_t len, int attr, uint_t flags)
+ 	vpp = svd->vpage;
+ 	offset = svd->offset + (uintptr_t)(addr - seg->s_base);
+ 	bflags = ((flags & MS_ASYNC) ? B_ASYNC : 0) |
+-	    ((flags & MS_INVALIDATE) ? B_INVAL : 0);
++	    ((flags & MS_INVALIDATE) ? B_INVAL : 0) |
++	    ((flags & MS_INVALCURPROC) ? (B_INVALCURONLY | B_INVAL) : 0);
+ 
+ 	if (attr) {
+ 		pageprot = attr & ~(SHARED|PRIVATE);
+@@ -7333,11 +7334,11 @@ segvn_sync(struct seg *seg, caddr_t addr, size_t len, int attr, uint_t flags)
+ 			vpp = &svd->vpage[seg_page(seg, addr)];
+ 
+ 	} else if (svd->vp && svd->amp == NULL &&
+-	    (flags & MS_INVALIDATE) == 0) {
++	    (flags & (MS_INVALIDATE | MS_INVALCURPROC)) == 0) {
+ 
+ 		/*
+-		 * No attributes, no anonymous pages and MS_INVALIDATE flag
+-		 * is not on, just use one big request.
++		 * No attributes, no anonymous pages and MS_INVAL* flags
++		 * are not on, just use one big request.
+ 		 */
+ 		err = VOP_PUTPAGE(svd->vp, (offset_t)offset, len,
+ 		    bflags, svd->cred, NULL);
+@@ -7389,7 +7390,7 @@ segvn_sync(struct seg *seg, caddr_t addr, size_t len, int attr, uint_t flags)
+ 		 * might race in and lock the page after we unlock and before
+ 		 * we do the PUTPAGE, then PUTPAGE simply does nothing.
+ 		 */
+-		if (flags & MS_INVALIDATE) {
++		if (flags & (MS_INVALIDATE | MS_INVALCURPROC)) {
+ 			if ((pp = page_lookup(vp, off, SE_SHARED)) != NULL) {
+ 				if (pp->p_lckcnt != 0 || pp->p_cowcnt != 0) {
+ 					page_unlock(pp);
+diff --git a/usr/src/uts/common/vm/vm_pvn.c b/usr/src/uts/common/vm/vm_pvn.c
+index 1b8d12e..e2e0080 100644
+--- a/usr/src/uts/common/vm/vm_pvn.c
++++ b/usr/src/uts/common/vm/vm_pvn.c
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright (c) 1986, 2010, Oracle and/or its affiliates. All rights reserved.
+  * Copyright 2015 Nexenta Systems, Inc.  All rights reserved.
++ * Copyright (c) 2012, Joyent, Inc. All rights reserved.
+  */
+ 
+ /*	Copyright (c) 1984, 1986, 1987, 1988, 1989 AT&T	*/
+@@ -432,7 +433,14 @@ pvn_write_done(page_t *plist, int flags)
+ 				page_io_unlock(pp);
+ 				page_unlock(pp);
+ 			}
+-		} else if (flags & B_INVAL) {
++		} else if ((flags & (B_INVAL | B_INVALCURONLY)) == B_INVAL) {
++			/*
++			 * If B_INVALCURONLY is set, then we handle that case
++			 * in the next conditional if hat_page_is_mapped()
++			 * indicates that there are no additional mappings
++			 * to the page.
++			 */
++
+ 			/*
+ 			 * XXX - Failed writes with B_INVAL set are
+ 			 * not handled appropriately.
+@@ -573,8 +581,9 @@ pvn_write_done(page_t *plist, int flags)
+ }
+ 
+ /*
+- * Flags are composed of {B_ASYNC, B_INVAL, B_FREE, B_DONTNEED, B_DELWRI,
+- * B_TRUNC, B_FORCE}.  B_DELWRI indicates that this page is part of a kluster
++ * Flags are composed of {B_ASYNC, B_INVAL, B_INVALCURONLY, B_FREE,
++ * B_DONTNEED, B_DELWRI, B_TRUNC, B_FORCE}.
++ * B_DELWRI indicates that this page is part of a kluster
+  * operation and is only to be considered if it doesn't involve any
+  * waiting here.  B_TRUNC indicates that the file is being truncated
+  * and so no i/o needs to be done. B_FORCE indicates that the page
+@@ -628,13 +637,17 @@ pvn_getdirty(page_t *pp, int flags)
+ 	 * If we want to free or invalidate the page then
+ 	 * we need to unload it so that anyone who wants
+ 	 * it will have to take a minor fault to get it.
++	 * If we are only invalidating the page for the
++	 * current process, then pass in a different flag.
+ 	 * Otherwise, we're just writing the page back so we
+ 	 * need to sync up the hardwre and software mod bit to
+ 	 * detect any future modifications.  We clear the
+ 	 * software mod bit when we put the page on the dirty
+ 	 * list.
+ 	 */
+-	if (flags & (B_INVAL | B_FREE)) {
++	if (flags & B_INVALCURONLY) {
++		(void) hat_pageunload(pp, HAT_CURPROC_PGUNLOAD);
++	} else if (flags & (B_INVAL | B_FREE)) {
+ 		(void) hat_pageunload(pp, HAT_FORCE_PGUNLOAD);
+ 	} else {
+ 		(void) hat_pagesync(pp, HAT_SYNC_ZERORM);
+@@ -646,7 +659,7 @@ pvn_getdirty(page_t *pp, int flags)
+ 		 * list after all.
+ 		 */
+ 		page_io_unlock(pp);
+-		if (flags & B_INVAL) {
++		if ((flags & (B_INVAL | B_INVALCURONLY)) == B_INVAL) {
+ 			/*LINTED: constant in conditional context*/
+ 			VN_DISPOSE(pp, B_INVAL, 0, kcred);
+ 		} else if (flags & B_FREE) {
+@@ -658,6 +671,9 @@ pvn_getdirty(page_t *pp, int flags)
+ 			 * of VOP_PUTPAGE() who prefer freeing the
+ 			 * page _only_ if no one else is accessing it.
+ 			 * E.g. segmap_release()
++			 * We also take this path for B_INVALCURONLY and
++			 * let page_release call VN_DISPOSE if no one else is
++			 * using the page.
+ 			 *
+ 			 * The above hat_ismod() check is useless because:
+ 			 * (1) we may not be holding SE_EXCL lock;
+@@ -682,7 +698,7 @@ pvn_getdirty(page_t *pp, int flags)
+ 	 * We'll detect the fact that they used it when the
+ 	 * i/o is done and avoid freeing the page.
+ 	 */
+-	if (flags & B_FREE)
++	if (flags & (B_FREE | B_INVALCURONLY))
+ 		page_downgrade(pp);
+ 
+ 
+diff --git a/usr/src/uts/common/vm/vm_usage.c b/usr/src/uts/common/vm/vm_usage.c
+index abdf4be..a8c1f85 100644
+--- a/usr/src/uts/common/vm/vm_usage.c
++++ b/usr/src/uts/common/vm/vm_usage.c
+@@ -939,7 +939,10 @@ vmu_amp_update_incore_bounds(avl_tree_t *tree, struct anon_map *amp,
+ 
+ 			if (ap != NULL && vn != NULL && vn->v_pages != NULL &&
+ 			    (page = page_exists(vn, off)) != NULL) {
+-				page_type = VMUSAGE_BOUND_INCORE;
++				if (PP_ISFREE(page))
++					page_type = VMUSAGE_BOUND_NOT_INCORE;
++				else
++					page_type = VMUSAGE_BOUND_INCORE;
+ 				if (page->p_szc > 0) {
+ 					pgcnt = page_get_pagecnt(page->p_szc);
+ 					pgshft = page_get_shift(page->p_szc);
+@@ -1026,7 +1029,10 @@ vmu_vnode_update_incore_bounds(avl_tree_t *tree, vnode_t *vnode,
+ 
+ 			if (vnode->v_pages != NULL &&
+ 			    (page = page_exists(vnode, ptob(index))) != NULL) {
+-				page_type = VMUSAGE_BOUND_INCORE;
++				if (PP_ISFREE(page))
++					page_type = VMUSAGE_BOUND_NOT_INCORE;
++				else
++					page_type = VMUSAGE_BOUND_INCORE;
+ 				if (page->p_szc > 0) {
+ 					pgcnt = page_get_pagecnt(page->p_szc);
+ 					pgshft = page_get_shift(page->p_szc);
+@@ -1306,6 +1312,12 @@ vmu_calculate_seg(vmu_entity_t *vmu_entities, struct seg *seg)
+ 			}
+ 
+ 			/*
++			 * Pages on the free list aren't counted for the rss.
++			 */
++			if (PP_ISFREE(page))
++				continue;
++
++			/*
+ 			 * Assume anon structs with a refcnt
+ 			 * of 1 are not COW shared, so there
+ 			 * is no reason to track them per entity.
+diff --git a/usr/src/uts/i86pc/vm/hat_i86.c b/usr/src/uts/i86pc/vm/hat_i86.c
+index ea2a83b..71c64f2 100644
+--- a/usr/src/uts/i86pc/vm/hat_i86.c
++++ b/usr/src/uts/i86pc/vm/hat_i86.c
+@@ -28,6 +28,7 @@
+ /*
+  * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2014, 2015 by Delphix. All rights reserved.
++ * Copyright 2012 Joyent, Inc.  All rights reserved.
+  */
+ 
+ /*
+@@ -3379,15 +3380,13 @@ hati_page_unmap(page_t *pp, htable_t *ht, uint_t entry)
+ 
+ extern int	vpm_enable;
+ /*
+- * Unload all translations to a page. If the page is a subpage of a large
++ * Unload translations to a page. If the page is a subpage of a large
+  * page, the large page mappings are also removed.
+- *
+- * The forceflags are unused.
++ * If unloadflag is HAT_CURPROC_PGUNLOAD, then we only unload the translation
++ * for the current process, otherwise all translations are unloaded.
+  */
+-
+-/*ARGSUSED*/
+ static int
+-hati_pageunload(struct page *pp, uint_t pg_szcd, uint_t forceflag)
++hati_pageunload(struct page *pp, uint_t pg_szcd, uint_t unloadflag)
+ {
+ 	page_t		*cur_pp = pp;
+ 	hment_t		*hm;
+@@ -3395,6 +3394,8 @@ hati_pageunload(struct page *pp, uint_t pg_szcd, uint_t forceflag)
+ 	htable_t	*ht;
+ 	uint_t		entry;
+ 	level_t		level;
++	struct hat	*curhat;
++	ulong_t		cnt;
+ 
+ 	XPV_DISALLOW_MIGRATE();
+ 
+@@ -3404,6 +3405,9 @@ hati_pageunload(struct page *pp, uint_t pg_szcd, uint_t forceflag)
+ 	++curthread->t_hatdepth;
+ 	ASSERT(curthread->t_hatdepth < 16);
+ 
++	if (unloadflag == HAT_CURPROC_PGUNLOAD)
++		curhat = curthread->t_procp->p_as->a_hat;
++
+ #if defined(__amd64)
+ 	/*
+ 	 * clear the vpm ref.
+@@ -3416,6 +3420,8 @@ hati_pageunload(struct page *pp, uint_t pg_szcd, uint_t forceflag)
+ 	 * The loop with next_size handles pages with multiple pagesize mappings
+ 	 */
+ next_size:
++	if (unloadflag == HAT_CURPROC_PGUNLOAD)
++		cnt = hat_page_getshare(cur_pp);
+ 	for (;;) {
+ 
+ 		/*
+@@ -3427,6 +3433,7 @@ next_size:
+ 			if (hm == NULL) {
+ 				x86_hm_exit(cur_pp);
+ 
++curproc_done:
+ 				/*
+ 				 * If not part of a larger page, we're done.
+ 				 */
+@@ -3453,8 +3460,21 @@ next_size:
+ 			 * If this mapping size matches, remove it.
+ 			 */
+ 			level = ht->ht_level;
+-			if (level == pg_szcd)
+-				break;
++			if (level == pg_szcd) {
++				if (unloadflag != HAT_CURPROC_PGUNLOAD ||
++				    ht->ht_hat == curhat)
++					break;
++				/*
++				 * unloadflag == HAT_CURPROC_PGUNLOAD but it's
++				 * not the hat for the current process. Leave
++				 * entry in place. Also do a safety check to
++				 * ensure we don't get in an infinite loop
++				 */
++				if (cnt-- == 0) {
++					x86_hm_exit(cur_pp);
++					goto curproc_done;
++				}
++			}
+ 		}
+ 
+ 		/*
+@@ -3464,14 +3484,18 @@ next_size:
+ 		hm = hati_page_unmap(cur_pp, ht, entry);
+ 		if (hm != NULL)
+ 			hment_free(hm);
++
++		/* Perform check above for being part of a larger page. */
++		if (unloadflag == HAT_CURPROC_PGUNLOAD)
++			goto curproc_done;
+ 	}
+ }
+ 
+ int
+-hat_pageunload(struct page *pp, uint_t forceflag)
++hat_pageunload(struct page *pp, uint_t unloadflag)
+ {
+ 	ASSERT(PAGE_EXCL(pp));
+-	return (hati_pageunload(pp, 0, forceflag));
++	return (hati_pageunload(pp, 0, unloadflag));
+ }
+ 
+ /*
+-- 
+2.8.0
+

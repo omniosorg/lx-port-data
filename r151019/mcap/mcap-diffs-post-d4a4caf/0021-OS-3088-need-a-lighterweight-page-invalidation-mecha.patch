@@ -1,0 +1,821 @@
+From 6499248fec005d80785fa89a7a625819ae99dadf Mon Sep 17 00:00:00 2001
+From: Jerry Jelinek <jerry.jelinek@joyent.com>
+Date: Thu, 26 Jun 2014 20:40:57 +0000
+Subject: [PATCH 21/22] OS-3088 need a lighterweight page invalidation
+ mechanism for zone memcap
+
+---
+ usr/src/cmd/zoneadmd/mcap.c            | 275 ++++-----------------------------
+ usr/src/uts/common/sys/resource.h      |   2 +
+ usr/src/uts/common/sys/vm_usage.h      |   3 +-
+ usr/src/uts/common/syscall/rusagesys.c |  14 ++
+ usr/src/uts/common/vm/hat.h            |  10 +-
+ usr/src/uts/common/vm/vm_usage.c       | 182 ++++++++++++++++++++++
+ usr/src/uts/i86pc/vm/hat_i86.c         |  61 +++++---
+ 7 files changed, 277 insertions(+), 270 deletions(-)
+
+diff --git a/usr/src/cmd/zoneadmd/mcap.c b/usr/src/cmd/zoneadmd/mcap.c
+index d767afb..2e94c7e 100644
+--- a/usr/src/cmd/zoneadmd/mcap.c
++++ b/usr/src/cmd/zoneadmd/mcap.c
+@@ -130,15 +130,6 @@
+ #define	TUNE_NPFTHROT	"phys-mcap-no-pf-throttle"
+ 
+ /*
+- * The large mapping value was derived empirically by seeing that mappings
+- * much bigger than 16mb sometimes take a relatively long time to invalidate
+- * (significant fraction of a second).
+- */
+-#define	SEC_INTERIM	4	/* num secs to pause after stopped too long */
+-#define	MSEC_TOO_LONG	100	/* release proc. after stopped for 100ms */
+-#define	LARGE_MAPPING	16384	/* >= 16MB in KB - pageout in chunks */
+-
+-/*
+  * These are only used in get_mem_info but global. We always need scale_rss and
+  * prev_fast_rss to be persistent but we also have the other two global so we
+  * can easily see these with mdb.
+@@ -298,40 +289,6 @@ run_over_cmd()
+ 	}
+ }
+ 
+-static struct ps_prochandle *
+-control_proc(pid_t pid)
+-{
+-	int res;
+-	struct ps_prochandle *ph;
+-
+-	/* Take control of the process. */
+-	if ((ph = Pgrab(pid, 0, &res)) == NULL)
+-		return (NULL);
+-
+-	if (Psetflags(ph, PR_RLC) != 0) {
+-		(void) Prelease(ph, 0);
+-		return (NULL);
+-	}
+-
+-	if (Pcreate_agent(ph) != 0) {
+-		(void) Prelease(ph, 0);
+-		return (NULL);
+-	}
+-
+-	/* Verify agent LWP is actually stopped. */
+-	errno = 0;
+-	while (Pstate(ph) == PS_RUN)
+-		(void) Pwait(ph, 0);
+-
+-	if (Pstate(ph) != PS_STOP) {
+-		Pdestroy_agent(ph);
+-		(void) Prelease(ph, 0);
+-		return (NULL);
+-	}
+-
+-	return (ph);
+-}
+-
+ /*
+  * Get the next mapping.
+  */
+@@ -393,32 +350,23 @@ done:
+ }
+ 
+ /*
+- * Attempt to page out a region of the given process's address space.  May
+- * return nonzero if not all of the pages may are pageable, for any reason.
++ * Attempt to invalidate the entire mapping from within the given process's
++ * address space. May return nonzero with errno as:
++ *    ESRCH  - process not found
++ *    ENOMEM - segment not found
++ *    EINVAL - mapping exceeds a single segment
+  */
+ static int
+-pageout_mapping(struct ps_prochandle *Pr, prmap_t *pmp, uintptr_t start,
+-    size_t sz)
++pageout_mapping(pid_t pid, prmap_t *pmp)
+ {
+ 	int res;
+ 
+ 	if (pmp->pr_mflags & MA_ISM || pmp->pr_mflags & MA_SHM)
+ 		return (0);
+ 
+-	/*
+-	 * See the description of the B_INVAL and B_INVALCURONLY flags in
+-	 * sys/buf.h for a discussion of how MS_INVALCURPROC is handled.
+-	 */
+ 	errno = 0;
+-	res = pr_memcntl(Pr, (caddr_t)start, sz, MC_SYNC,
+-	    (caddr_t)(MS_ASYNC | MS_INVALCURPROC), 0, 0);
+-
+-	/*
+-	 * EBUSY indicates none of the pages have backing store allocated, or
+-	 * some pages were locked.  Don't care about this.
+-	 */
+-	if (res != 0 && errno == EBUSY)
+-		res = 0;
++	res = syscall(SYS_rusagesys, _RUSAGESYS_INVALMAP, pid, pmp->pr_vaddr,
++	    pmp->pr_size);
+ 
+ 	return (res);
+ }
+@@ -426,9 +374,6 @@ pageout_mapping(struct ps_prochandle *Pr, prmap_t *pmp, uintptr_t start,
+ /*
+  * Work through a process paging out mappings until the whole address space was
+  * examined or the excess is < 0.  Return our estimate of the updated excess.
+- *
+- * This stops the victim process while pageout is occuring so we take special
+- * care below not to leave the victim stopped for too long.
+  */
+ static int64_t
+ pageout_process(pid_t pid, int64_t excess)
+@@ -436,11 +381,9 @@ pageout_process(pid_t pid, int64_t excess)
+ 	int			psfd;
+ 	prmap_t			*pmap;
+ 	proc_map_t		cur;
+-	struct ps_prochandle	*ph = NULL;
+-	int64_t			sum_att, d_rss;
++	int			res;
++	int64_t			sum_d_rss, d_rss;
+ 	int64_t			old_rss;
+-	hrtime_t		stop_time;
+-	long			stopped_ms; /* elapsed time while stopped */
+ 	int			map_cnt;
+ 	psinfo_t		psinfo;
+ 	char			pathbuf[MAXPATHLEN];
+@@ -457,7 +400,6 @@ pageout_process(pid_t pid, int64_t excess)
+ 
+ 	old_rss = (int64_t)psinfo.pr_rssize;
+ 	map_cnt = 0;
+-	stop_time = 0;
+ 
+ 	/* If unscannable, skip it. */
+ 	if (psinfo.pr_nlwp == 0 || proc_issystem(pid)) {
+@@ -488,134 +430,13 @@ pageout_process(pid_t pid, int64_t excess)
+ 	/*
+ 	 * Within the process's address space, attempt to page out mappings.
+ 	 */
+-	sum_att = 0;
++	sum_d_rss = 0;
+ 	while (excess > 0 && pmap != NULL && !shutting_down) {
+-		int64_t		msize;
++		/* invalidate the entire mapping */
++		if ((res = pageout_mapping(pid, pmap)) < 0)
++			debug("pid %ld: mapping 0x%p %ldkb unpageable (%d)\n",
++			    pid, pmap->pr_vaddr, pmap->pr_size / 1024, errno);
+ 
+-		/*
+-		 * For a typical process, there will be some quantity of fairly
+-		 * small mappings (a few pages up to a few MB). These are for
+-		 * libraries, program text, heap allocations, etc. Thus, each
+-		 * one of these mappings will only contribute a small amount
+-		 * toward the goal of reducing the zone's RSS.
+-		 *
+-		 * However, in some cases a process might have one or more
+-		 * large (100s of MB or N GB) mappings (e.g. DB files or big
+-		 * heap). Each one of these will go a long way toward reducing
+-		 * the RSS. For these processes, being stopped while we
+-		 * invalidate the entire large mapping can have a noticeable
+-		 * impact on the process execution. In addition, after we get
+-		 * under the cap then once we resume invalidation, we want to
+-		 * try to pickup where we left off within the process address
+-		 * space so that all of its mappings are treated equally.
+-		 *
+-		 * To handle the first issue, when invalidating a large mapping
+-		 * (>= LARGE_MAPPING), then we do it in chunks.
+-		 *
+-		 * In all cases we keep track of how much time has elapsed
+-		 * (stopped_ms) since the process was stopped. If this gets to
+-		 * be too long (> MSEC_TOO_LONG), then we release the process
+-		 * so it can run for a while (SEC_INTERIM) before we re-grab it
+-		 * and do more pageout.
+-		 *
+-		 * If we get under the zone's cap while in the middle of this
+-		 * process we suspend invalidation in this code so that we can
+-		 * resume on this process later if we go over the cap again
+-		 * (although this process might be gone by that time).
+-		 */
+-
+-		if (ph == NULL) {
+-			/*
+-			 * (re)take control of the process. Due to the agent
+-			 * lwp, this stops the process.
+-			 */
+-			if ((ph = control_proc(pid)) == NULL) {
+-				/* the process might have exited */
+-				debug("%ld: cannot take control\n", pid);
+-				excess -= old_rss;
+-				goto done;
+-			}
+-
+-			stop_time = gethrtime();
+-		}
+-
+-		msize = pmap->pr_size / 1024;
+-		sum_att += msize;
+-
+-		/* Try to page out the mapping. */
+-
+-		if (msize >= LARGE_MAPPING) {
+-			/*
+-			 * For a large mapping, invalidate it in chunks and
+-			 * check how much time has passed in-between. If it's
+-			 * too much, let victim run for a while before doing
+-			 * more pageout on this mapping.
+-			 */
+-			uintptr_t addr;
+-			int64_t sz;
+-			int64_t amnt = LARGE_MAPPING * 1024;
+-
+-			addr = pmap->pr_vaddr;
+-			sz = pmap->pr_size;
+-
+-			while (sz > 0) {
+-				if (pageout_mapping(ph, pmap, addr, amnt) < 0) {
+-					debug("pid %ld: mapping unpageable\n",
+-					    pid);
+-				}
+-
+-				addr += amnt;
+-				sz -= amnt;
+-
+-				/* convert elapsed ns to ms */
+-				stopped_ms = (gethrtime() - stop_time) /
+-				    1000000;
+-
+-				if (stopped_ms > MSEC_TOO_LONG && sz > 0) {
+-					/*
+-					 * Process stopped too long, release it
+-					 * and wait a bit to give the process
+-					 * a chance to do some work.
+-					 */
+-					Pdestroy_agent(ph);
+-					(void) Prelease(ph, 0);
+-					ph = NULL;
+-
+-					/* log if stopped 1s or more */
+-					if (stopped_ms >= 1000)
+-						zerror(logp, B_FALSE, "zone %s "
+-						    " pid %ld stopped for "
+-						    "%ldms\n", zonename, pid,
+-						    stopped_ms);
+-
+-					debug("pid %ld: interim suspend "
+-					    "(elpsd: %ldms)\n", pid,
+-					    stopped_ms);
+-					(void) sleep_shutdown(SEC_INTERIM);
+-					if (shutting_down)
+-						goto done;
+-
+-					if ((ph = control_proc(pid)) == NULL) {
+-						/* the proc might have exited */
+-						debug("%ld: cannot retake "
+-						    "control\n", pid);
+-						excess -= old_rss;
+-						goto done;
+-					}
+-
+-					stop_time = gethrtime();
+-				}
+-
+-				if (sz < amnt)
+-					amnt = sz;
+-			}
+-		} else {
+-			/* invalidate the whole mapping at once */
+-			if (pageout_mapping(ph, pmap, pmap->pr_vaddr,
+-			    pmap->pr_size) < 0) {
+-				debug("pid %ld: mapping unpageable\n", pid);
+-			}
+-		}
+ 		map_cnt++;
+ 
+ 		/*
+@@ -629,52 +450,30 @@ pageout_process(pid_t pid, int64_t excess)
+ 
+ 		d_rss = (int64_t)psinfo.pr_rssize - old_rss;
+ 		old_rss = (int64_t)psinfo.pr_rssize;
++		sum_d_rss += d_rss;
+ 
+-		/* d_rss should be negative (or 0 if nothing paged out) */
++		/*
++		 * d_rss hopefully should be negative (or 0 if nothing
++		 * invalidated) but can be positive if more got paged in.
++		 */
+ 		excess += d_rss;
+ 
+-		/* convert elapsed ns to ms */
+-		stopped_ms = (gethrtime() - stop_time) / 1000000;
++		if (excess <= 0) {
++			debug("pid %ld: (part.) nmap %d delta_rss %lldKB "
++			    "excess %lldKB\n", pid, map_cnt,
++			    (unsigned long long)sum_d_rss, (long long)excess);
++			map_cnt = 0;
+ 
+-		if (excess <= 0 || stopped_ms > MSEC_TOO_LONG) {
+ 			/*
+-			 * In either case, we release control of the process
+-			 * and let it run.
++			 * If we're actually under, this will suspend checking
++			 * in the middle of this process's address space.
+ 			 */
+-			if (ph != NULL) {
+-				Pdestroy_agent(ph);
+-				(void) Prelease(ph, 0);
+-				ph = NULL;
+-			}
+-
+-			/* log if stopped 1s or more */
+-			if (stopped_ms >= 1000)
+-				zerror(logp, B_FALSE, "zone %s pid %ld stopped "
+-				    "for %ldms\n", zonename, pid, stopped_ms);
+-
+-			debug("pid %ld: (part.) nmap %d atmpt %lluKB "
+-			    "excess %lldKB stopped %ldms\n",
+-			    pid, map_cnt, (unsigned long long)sum_att,
+-			    (long long)excess, stopped_ms);
+-			map_cnt = 0;
+-
+-			if (excess <= 0) {
+-				/*
+-				 * If we're actually under, this will suspend
+-				 * checking in the middle of this process's
+-				 * address space.
+-				 */
+-				excess = check_suspend();
+-			} else {
+-				/* Not under, but proc stopped too long. */
+-				(void) sleep_shutdown(SEC_INTERIM);
+-			}
+-
++			excess = check_suspend();
+ 			if (shutting_down)
+ 				goto done;
+ 
+ 			/*
+-			 * since the process was released, re-read it's rss
++			 * since we might have suspended, re-read process's rss
+ 			 */
+ 			if (pread(psfd, &psinfo, sizeof (psinfo), 0)
+ 			    != sizeof (psinfo)) {
+@@ -686,26 +485,16 @@ pageout_process(pid_t pid, int64_t excess)
+ 
+ 			debug("pid %ld: resume pageout; excess %lld\n", pid,
+ 			    (long long)excess);
+-			sum_att = 0;
++			sum_d_rss = 0;
+ 		}
+ 
+ 		pmap = nextmapping(&cur);
+ 	}
+ 
+-	/* convert elapsed ns to ms */
+-	stopped_ms = (gethrtime() - stop_time) / 1000000;
+-
+-	debug("pid %ld: nmap %d atmpt %lluKB excess %lldKB stopped %ldms\n",
+-	    pid, map_cnt, (unsigned long long)sum_att, (long long)excess,
+-	    stopped_ms);
++	debug("pid %ld: nmap %d delta_rss %lldKB excess %lldKB\n",
++	    pid, map_cnt, (unsigned long long)sum_d_rss, (long long)excess);
+ 
+ done:
+-	/* If a process is grabbed, release it, destroying its agent. */
+-	if (ph != NULL) {
+-		Pdestroy_agent(ph);
+-		(void) Prelease(ph, 0);
+-	}
+-
+ 	if (cur.pr_mapp != NULL)
+ 		free(cur.pr_mapp);
+ 
+diff --git a/usr/src/uts/common/sys/resource.h b/usr/src/uts/common/sys/resource.h
+index 2d3800b..4b70a77 100644
+--- a/usr/src/uts/common/sys/resource.h
++++ b/usr/src/uts/common/sys/resource.h
+@@ -23,6 +23,7 @@
+  *
+  * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
++ * Copyright 2014 Joyent, Inc.  All rights reserved.
+  */
+ 
+ /*	Copyright (c) 1984, 1986, 1987, 1988, 1989 AT&T	*/
+@@ -191,6 +192,7 @@ struct	rusage {
+ #define	_RUSAGESYS_GETRUSAGE_CHLD	1	/* rusage child process */
+ #define	_RUSAGESYS_GETRUSAGE_LWP	2	/* rusage lwp */
+ #define	_RUSAGESYS_GETVMUSAGE		3	/* getvmusage */
++#define	_RUSAGESYS_INVALMAP		4	/* vm_map_inval */
+ 
+ #if defined(_SYSCALL32)
+ 
+diff --git a/usr/src/uts/common/sys/vm_usage.h b/usr/src/uts/common/sys/vm_usage.h
+index 97e3430..c2954cb 100644
+--- a/usr/src/uts/common/sys/vm_usage.h
++++ b/usr/src/uts/common/sys/vm_usage.h
+@@ -21,7 +21,7 @@
+ /*
+  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
+- * Copyright 2012 Joyent, Inc.  All rights reserved.
++ * Copyright 2014 Joyent, Inc.  All rights reserved.
+  */
+ 
+ #ifndef	_SYS_VM_USAGE_H
+@@ -110,6 +110,7 @@ extern int getvmusage(uint_t flags, time_t age, vmusage_t *buf, size_t *nres);
+ 
+ int vm_getusage(uint_t, time_t, vmusage_t *, size_t *, int);
+ void vm_usage_init();
++int vm_map_inval(pid_t, caddr_t, size_t);
+ 
+ #endif	/* _KERNEL */
+ 
+diff --git a/usr/src/uts/common/syscall/rusagesys.c b/usr/src/uts/common/syscall/rusagesys.c
+index 3e0e63f..417c629 100644
+--- a/usr/src/uts/common/syscall/rusagesys.c
++++ b/usr/src/uts/common/syscall/rusagesys.c
+@@ -21,6 +21,7 @@
+ /*
+  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
++ * Copyright 2014 Joyent, Inc.  All rights reserved.
+  */
+ 
+ /*
+@@ -257,6 +258,19 @@ rusagesys(int code, void *arg1, void *arg2, void *arg3, void *arg4)
+ 	case _RUSAGESYS_GETVMUSAGE:
+ 		return (vm_getusage((uint_t)(uintptr_t)arg1, (time_t)arg2,
+ 		    (vmusage_t *)arg3, (size_t *)arg4, 0));
++	case _RUSAGESYS_INVALMAP:
++		/*
++		 * SPARC sfmmu hat does not support HAT_CURPROC_PGUNLOAD
++		 * handling so callers on SPARC should get simple sync
++		 * handling with invalidation to all processes.
++		 */
++#if defined(__sparc)
++		return (memcntl((caddr_t)arg2, (size_t)arg3, MC_SYNC,
++		    (caddr_t)(MS_ASYNC | MS_INVALIDATE), 0, 0));
++#else
++		return (vm_map_inval((pid_t)(uintptr_t)arg1, (caddr_t)arg2,
++		    (size_t)arg3));
++#endif
+ 	default:
+ 		return (set_errno(EINVAL));
+ 	}
+diff --git a/usr/src/uts/common/vm/hat.h b/usr/src/uts/common/vm/hat.h
+index 156b810..c908a9e 100644
+--- a/usr/src/uts/common/vm/hat.h
++++ b/usr/src/uts/common/vm/hat.h
+@@ -21,7 +21,7 @@
+ /*
+  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
+- * Copyright 2012 Joyent, Inc.  All rights reserved.
++ * Copyright 2014 Joyent, Inc.  All rights reserved.
+  */
+ 
+ /*	Copyright (c) 1984, 1986, 1987, 1988, 1989 AT&T	*/
+@@ -270,7 +270,12 @@ void	hat_kpm_walk(void (*)(void *, void *, size_t), void *);
+  *	call.
+  *
+  * int hat_pageunload(pp, forceflag)
+- *	unload all translations attached to pp.
++ *	Unload all translations attached to pp. On x86 the bulk of the work is
++ *	done by hat_page_inval.
++ *
++ * void	hat_page_inval(pp, pgsz, curhat)
++ *	Unload translations attached to pp. If curhat is provided, only the
++ *	translation for that process is unloaded, otherwise all are unloaded.
+  *
+  * uint_t hat_pagesync(pp, flags)
+  *	get hw stats from hardware into page struct and reset hw stats
+@@ -292,6 +297,7 @@ void	hat_page_setattr(struct page *, uint_t);
+ void	hat_page_clrattr(struct page *, uint_t);
+ uint_t	hat_page_getattr(struct page *, uint_t);
+ int	hat_pageunload(struct page *, uint_t);
++void	hat_page_inval(struct page *, uint_t, struct hat *);
+ uint_t	hat_pagesync(struct page *, uint_t);
+ ulong_t	hat_page_getshare(struct page *);
+ int	hat_page_checkshare(struct page *, ulong_t);
+diff --git a/usr/src/uts/common/vm/vm_usage.c b/usr/src/uts/common/vm/vm_usage.c
+index a8c1f85..37d538a 100644
+--- a/usr/src/uts/common/vm/vm_usage.c
++++ b/usr/src/uts/common/vm/vm_usage.c
+@@ -2098,3 +2098,185 @@ start:
+ 	vmu_data.vmu_pending_waiters--;
+ 	goto start;
+ }
++
++#if defined(__x86)
++/*
++ * Attempt to invalidate all of the pages in the mapping for the given process.
++ */
++static void
++map_inval(proc_t *p, struct seg *seg, caddr_t addr, size_t size)
++{
++	page_t		*pp;
++	size_t		psize;
++	u_offset_t	off;
++	caddr_t		eaddr;
++	struct vnode	*vp;
++	struct segvn_data *svd;
++	struct hat	*victim_hat;
++
++	ASSERT((addr + size) <= (seg->s_base + seg->s_size));
++
++	victim_hat = p->p_as->a_hat;
++	svd = (struct segvn_data *)seg->s_data;
++	vp = svd->vp;
++	psize = page_get_pagesize(seg->s_szc);
++
++	off = svd->offset + (uintptr_t)(addr - seg->s_base);
++
++	for (eaddr = addr + size; addr < eaddr; addr += psize, off += psize) {
++		pp = page_lookup_nowait(vp, off, SE_SHARED);
++
++		if (pp != NULL) {
++			/* following logic based on pvn_getdirty() */
++
++			if (pp->p_lckcnt != 0 || pp->p_cowcnt != 0) {
++				page_unlock(pp);
++				continue;
++			}
++
++			page_io_lock(pp);
++			hat_page_inval(pp, 0, victim_hat);
++			page_io_unlock(pp);
++
++			/*
++			 * For B_INVALCURONLY-style handling we let
++			 * page_release call VN_DISPOSE if no one else is using
++			 * the page.
++			 *
++			 * A hat_ismod() check would be useless because:
++			 * (1) we are not be holding SE_EXCL lock
++			 * (2) we've not unloaded _all_ translations
++			 *
++			 * Let page_release() do the heavy-lifting.
++			 */
++			(void) page_release(pp, 1);
++		}
++	}
++}
++
++/*
++ * vm_map_inval()
++ *
++ * Invalidate as many pages as possible within the given mapping for the given
++ * process. addr is expected to be the base address of the mapping and size is
++ * the length of the mapping. In some cases a mapping will encompass an
++ * entire segment, but at least for anon or stack mappings, these will be
++ * regions within a single large segment. Thus, the invalidation is oriented
++ * around a single mapping and not an entire segment.
++ *
++ * SPARC sfmmu hat does not support HAT_CURPROC_PGUNLOAD-style handling so
++ * this code is only applicable to x86.
++ */
++int
++vm_map_inval(pid_t pid, caddr_t addr, size_t size)
++{
++	int ret;
++	int error = 0;
++	proc_t *p;		/* target proc */
++	struct as *as;		/* target proc's address space */
++	struct seg *seg;	/* working segment */
++
++	if (curproc->p_zone != global_zone || crgetruid(curproc->p_cred) != 0)
++		return (set_errno(EPERM));
++
++	/* If not a valid mapping address, return an error */
++	if ((caddr_t)((uintptr_t)addr & (uintptr_t)PAGEMASK) != addr)
++		return (set_errno(EINVAL));
++
++again:
++	mutex_enter(&pidlock);
++	p = prfind(pid);
++	if (p == NULL) {
++		mutex_exit(&pidlock);
++		return (set_errno(ESRCH));
++	}
++
++	mutex_enter(&p->p_lock);
++	mutex_exit(&pidlock);
++
++	if (panicstr != NULL) {
++		mutex_exit(&p->p_lock);
++		return (0);
++	}
++
++	as = p->p_as;
++
++	/*
++	 * Try to set P_PR_LOCK - prevents process "changing shape"
++	 * - blocks fork
++	 * - blocks sigkill
++	 * - cannot be a system proc
++	 * - must be fully created proc
++	 */
++	ret = sprtrylock_proc(p);
++	if (ret == -1) {
++		/* Process in invalid state */
++		mutex_exit(&p->p_lock);
++		return (set_errno(ESRCH));
++	}
++
++	if (ret == 1) {
++		/*
++		 * P_PR_LOCK is already set. Wait and try again. This also
++		 * drops p_lock so p may no longer be valid since the proc may
++		 * have exited.
++		 */
++		sprwaitlock_proc(p);
++		goto again;
++	}
++
++	/* P_PR_LOCK is now set */
++	mutex_exit(&p->p_lock);
++
++	AS_LOCK_ENTER(as, &as->a_lock, RW_READER);
++	if ((seg = as_segat(as, addr)) == NULL) {
++		AS_LOCK_EXIT(as, &as->a_lock);
++		mutex_enter(&p->p_lock);
++		sprunlock(p);
++		return (set_errno(ENOMEM));
++	}
++
++	/*
++	 * The invalidation behavior only makes sense for vnode-backed segments.
++	 */
++	if (seg->s_ops != &segvn_ops) {
++		AS_LOCK_EXIT(as, &as->a_lock);
++		mutex_enter(&p->p_lock);
++		sprunlock(p);
++		return (0);
++	}
++
++	/*
++	 * If the mapping is out of bounds of the segement return an error.
++	 */
++	if ((addr + size) > (seg->s_base + seg->s_size)) {
++		AS_LOCK_EXIT(as, &as->a_lock);
++		mutex_enter(&p->p_lock);
++		sprunlock(p);
++		return (set_errno(EINVAL));
++	}
++
++	/*
++	 * Don't use MS_INVALCURPROC flag here since that would eventually
++	 * initiate hat invalidation based on curthread. Since we're doing this
++	 * on behalf of a different process, that would erroneously invalidate
++	 * our own process mappings.
++	 */
++	error = SEGOP_SYNC(seg, addr, size, 0, (uint_t)MS_ASYNC);
++	if (error == 0) {
++		/*
++		 * Since we didn't invalidate during the sync above, we now
++		 * try to invalidate all of the pages in the mapping.
++		 */
++		map_inval(p, seg, addr, size);
++	}
++	AS_LOCK_EXIT(as, &as->a_lock);
++
++	mutex_enter(&p->p_lock);
++	sprunlock(p);
++
++	if (error)
++		(void) set_errno(error);
++	return (error);
++}
++#endif
+diff --git a/usr/src/uts/i86pc/vm/hat_i86.c b/usr/src/uts/i86pc/vm/hat_i86.c
+index 71c64f2..b909899 100644
+--- a/usr/src/uts/i86pc/vm/hat_i86.c
++++ b/usr/src/uts/i86pc/vm/hat_i86.c
+@@ -28,7 +28,7 @@
+ /*
+  * Copyright 2011 Nexenta Systems, Inc.  All rights reserved.
+  * Copyright (c) 2014, 2015 by Delphix. All rights reserved.
+- * Copyright 2012 Joyent, Inc.  All rights reserved.
++ * Copyright 2014 Joyent, Inc.  All rights reserved.
+  */
+ 
+ /*
+@@ -3324,7 +3324,7 @@ hat_page_getattr(struct page *pp, uint_t flag)
+ 
+ 
+ /*
+- * common code used by hat_pageunload() and hment_steal()
++ * common code used by hat_page_inval() and hment_steal()
+  */
+ hment_t *
+ hati_page_unmap(page_t *pp, htable_t *ht, uint_t entry)
+@@ -3382,11 +3382,11 @@ extern int	vpm_enable;
+ /*
+  * Unload translations to a page. If the page is a subpage of a large
+  * page, the large page mappings are also removed.
+- * If unloadflag is HAT_CURPROC_PGUNLOAD, then we only unload the translation
+- * for the current process, otherwise all translations are unloaded.
++ * If curhat is not NULL, then we only unload the translation
++ * for the given process, otherwise all translations are unloaded.
+  */
+-static int
+-hati_pageunload(struct page *pp, uint_t pg_szcd, uint_t unloadflag)
++void
++hat_page_inval(struct page *pp, uint_t pg_szcd, struct hat *curhat)
+ {
+ 	page_t		*cur_pp = pp;
+ 	hment_t		*hm;
+@@ -3394,20 +3394,10 @@ hati_pageunload(struct page *pp, uint_t pg_szcd, uint_t unloadflag)
+ 	htable_t	*ht;
+ 	uint_t		entry;
+ 	level_t		level;
+-	struct hat	*curhat;
+ 	ulong_t		cnt;
+ 
+ 	XPV_DISALLOW_MIGRATE();
+ 
+-	/*
+-	 * prevent recursion due to kmem_free()
+-	 */
+-	++curthread->t_hatdepth;
+-	ASSERT(curthread->t_hatdepth < 16);
+-
+-	if (unloadflag == HAT_CURPROC_PGUNLOAD)
+-		curhat = curthread->t_procp->p_as->a_hat;
+-
+ #if defined(__amd64)
+ 	/*
+ 	 * clear the vpm ref.
+@@ -3420,7 +3410,7 @@ hati_pageunload(struct page *pp, uint_t pg_szcd, uint_t unloadflag)
+ 	 * The loop with next_size handles pages with multiple pagesize mappings
+ 	 */
+ next_size:
+-	if (unloadflag == HAT_CURPROC_PGUNLOAD)
++	if (curhat != NULL)
+ 		cnt = hat_page_getshare(cur_pp);
+ 	for (;;) {
+ 
+@@ -3438,10 +3428,8 @@ curproc_done:
+ 				 * If not part of a larger page, we're done.
+ 				 */
+ 				if (cur_pp->p_szc <= pg_szcd) {
+-					ASSERT(curthread->t_hatdepth > 0);
+-					--curthread->t_hatdepth;
+ 					XPV_ALLOW_MIGRATE();
+-					return (0);
++					return;
+ 				}
+ 
+ 				/*
+@@ -3461,11 +3449,10 @@ curproc_done:
+ 			 */
+ 			level = ht->ht_level;
+ 			if (level == pg_szcd) {
+-				if (unloadflag != HAT_CURPROC_PGUNLOAD ||
+-				    ht->ht_hat == curhat)
++				if (curhat == NULL || ht->ht_hat == curhat)
+ 					break;
+ 				/*
+-				 * unloadflag == HAT_CURPROC_PGUNLOAD but it's
++				 * Unloading only the given process but it's
+ 				 * not the hat for the current process. Leave
+ 				 * entry in place. Also do a safety check to
+ 				 * ensure we don't get in an infinite loop
+@@ -3486,11 +3473,37 @@ curproc_done:
+ 			hment_free(hm);
+ 
+ 		/* Perform check above for being part of a larger page. */
+-		if (unloadflag == HAT_CURPROC_PGUNLOAD)
++		if (curhat != NULL)
+ 			goto curproc_done;
+ 	}
+ }
+ 
++/*
++ * Unload translations to a page. If unloadflag is HAT_CURPROC_PGUNLOAD, then
++ * we only unload the translation for the current process, otherwise all
++ * translations are unloaded.
++ */
++static int
++hati_pageunload(struct page *pp, uint_t pg_szcd, uint_t unloadflag)
++{
++	struct hat	*curhat = NULL;
++
++	/*
++	 * prevent recursion due to kmem_free()
++	 */
++	++curthread->t_hatdepth;
++	ASSERT(curthread->t_hatdepth < 16);
++
++	if (unloadflag == HAT_CURPROC_PGUNLOAD)
++		curhat = curthread->t_procp->p_as->a_hat;
++
++	hat_page_inval(pp, pg_szcd, curhat);
++
++	ASSERT(curthread->t_hatdepth > 0);
++	--curthread->t_hatdepth;
++	return (0);
++}
++
+ int
+ hat_pageunload(struct page *pp, uint_t unloadflag)
+ {
+-- 
+2.8.0
+

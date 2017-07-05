@@ -1,0 +1,33 @@
+From e75120d7ae4a97fef2b704b20830afdc40676ca9 Mon Sep 17 00:00:00 2001
+From: Jerry Jelinek <jerry.jelinek@joyent.com>
+Date: Thu, 5 Jun 2014 16:22:31 +0000
+Subject: [PATCH 20/22] OS-3084 still seeing >1s proc stop times from the zone
+ memory capper
+
+---
+ usr/src/cmd/zoneadmd/mcap.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/usr/src/cmd/zoneadmd/mcap.c b/usr/src/cmd/zoneadmd/mcap.c
+index bc6493a..d767afb 100644
+--- a/usr/src/cmd/zoneadmd/mcap.c
++++ b/usr/src/cmd/zoneadmd/mcap.c
+@@ -131,12 +131,12 @@
+ 
+ /*
+  * The large mapping value was derived empirically by seeing that mappings
+- * much bigger than 32mb sometimes take a relatively long time to invalidate
++ * much bigger than 16mb sometimes take a relatively long time to invalidate
+  * (significant fraction of a second).
+  */
+-#define	SEC_INTERIM	2	/* num secs to pause after stopped too long */
++#define	SEC_INTERIM	4	/* num secs to pause after stopped too long */
+ #define	MSEC_TOO_LONG	100	/* release proc. after stopped for 100ms */
+-#define	LARGE_MAPPING	32768	/* >= 32MB in KB - pageout in chunks */
++#define	LARGE_MAPPING	16384	/* >= 16MB in KB - pageout in chunks */
+ 
+ /*
+  * These are only used in get_mem_info but global. We always need scale_rss and
+-- 
+2.8.0
+

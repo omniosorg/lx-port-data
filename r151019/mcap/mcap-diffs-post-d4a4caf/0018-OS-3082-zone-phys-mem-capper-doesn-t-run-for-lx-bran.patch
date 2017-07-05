@@ -1,0 +1,26 @@
+From 5ebb17a920841d406b32a8a3f84da1d73f29d289 Mon Sep 17 00:00:00 2001
+From: Jerry Jelinek <jerry.jelinek@joyent.com>
+Date: Wed, 4 Jun 2014 13:26:39 +0000
+Subject: [PATCH 18/22] OS-3082 zone phys mem capper doesn't run for lx branded
+ zone
+
+---
+ usr/src/cmd/zoneadmd/mcap.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/usr/src/cmd/zoneadmd/mcap.c b/usr/src/cmd/zoneadmd/mcap.c
+index ff9dfd3..f56db6a 100644
+--- a/usr/src/cmd/zoneadmd/mcap.c
++++ b/usr/src/cmd/zoneadmd/mcap.c
+@@ -1155,7 +1155,7 @@ static int
+ chk_proc_fs(void *data, const char *spec, const char *dir,
+     const char *fstype, const char *opt)
+ {
+-	if (spec != NULL && strcmp(spec, "/proc") == 0)
++	if (spec != NULL && strcmp(fstype, "proc") == 0)
+ 		*((boolean_t *)data) = B_TRUE;
+ 
+ 	return (0);
+-- 
+2.8.0
+

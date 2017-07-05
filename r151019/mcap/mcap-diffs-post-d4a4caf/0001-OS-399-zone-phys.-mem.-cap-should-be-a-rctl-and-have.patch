@@ -1,0 +1,1407 @@
+From 788a9e74572556fef999ce85d135360dc7d9976e Mon Sep 17 00:00:00 2001
+From: Jerry Jelinek <jerry.jelinek@joyent.com>
+Date: Mon, 2 May 2011 07:46:23 -0700
+Subject: [PATCH 01/22] OS-399 zone phys. mem. cap should be a rctl and have
+ associated kstat
+
+---
+ usr/src/cmd/rcap/rcapadm/rcapadm.c             |  16 ++-
+ usr/src/cmd/rcap/rcapd/rcapd_collection_zone.c |  90 ++++++++++++-
+ usr/src/cmd/truss/print.c                      |   5 +-
+ usr/src/cmd/zoneadm/zoneadm.c                  |  27 ++--
+ usr/src/cmd/zoneadmd/vplat.c                   |  27 +---
+ usr/src/cmd/zonecfg/zonecfg.c                  | 129 ++++++++-----------
+ usr/src/cmd/zonestat/zonestatd/zonestatd.c     |  11 +-
+ usr/src/head/libzonecfg.h                      |  14 +--
+ usr/src/lib/libzonecfg/common/libzonecfg.c     | 138 +++++---------------
+ usr/src/lib/libzonecfg/common/mapfile-vers     |   5 +-
+ usr/src/uts/common/os/zone.c                   | 168 ++++++++++++++++++++++---
+ usr/src/uts/common/sys/zone.h                  |  21 +++-
+ usr/src/uts/common/syscall/sysconfig.c         |   9 +-
+ usr/src/uts/common/vm/vm_usage.c               |  25 ++++
+ 14 files changed, 409 insertions(+), 276 deletions(-)
+
+diff --git a/usr/src/cmd/rcap/rcapadm/rcapadm.c b/usr/src/cmd/rcap/rcapadm/rcapadm.c
+index 92888b2..b921154 100644
+--- a/usr/src/cmd/rcap/rcapadm/rcapadm.c
++++ b/usr/src/cmd/rcap/rcapadm/rcapadm.c
+@@ -21,6 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2011, Joyent, Inc. All rights reserved.
+  */
+ 
+ #include <sys/types.h>
+@@ -145,20 +146,29 @@ out:
+ 	scf_handle_destroy(h);
+ }
+ 
++static int
++set_zone_cap(char *zonename, uint64_t mcap)
++{
++	char cmd[128 + ZONENAME_MAX];
++
++	(void) snprintf(cmd, sizeof (cmd), "/usr/bin/prctl -r "
++	    "-n zone.max-physical-memory -v %llu -i zone %s", mcap, zonename);
++	return (system(cmd));
++}
++
+ /*
+  * Update the in-kernel memory cap for the specified zone.
+  */
+ static int
+ update_zone_mcap(char *zonename, char *maxrss)
+ {
+-	zoneid_t zone_id;
+ 	uint64_t num;
+ 
+ 	if (getzoneid() != GLOBAL_ZONEID || zonecfg_in_alt_root())
+ 		return (E_SUCCESS);
+ 
+ 	/* get the running zone from the kernel */
+-	if ((zone_id = getzoneidbyname(zonename)) == -1) {
++	if (getzoneidbyname(zonename) == -1) {
+ 		(void) fprintf(stderr, gettext("zone '%s' must be running\n"),
+ 		    zonename);
+ 		return (E_ERROR);
+@@ -169,7 +179,7 @@ update_zone_mcap(char *zonename, char *maxrss)
+ 		return (E_ERROR);
+ 	}
+ 
+-	if (zone_setattr(zone_id, ZONE_ATTR_PHYS_MCAP, &num, 0) == -1) {
++	if (set_zone_cap(zonename, num) == -1) {
+ 		(void) fprintf(stderr, gettext("could not set memory "
+ 		    "cap for zone '%s'\n"), zonename);
+ 		return (E_ERROR);
+diff --git a/usr/src/cmd/rcap/rcapd/rcapd_collection_zone.c b/usr/src/cmd/rcap/rcapd/rcapd_collection_zone.c
+index db86aa6..798ed97 100644
+--- a/usr/src/cmd/rcap/rcapd/rcapd_collection_zone.c
++++ b/usr/src/cmd/rcap/rcapd/rcapd_collection_zone.c
+@@ -21,16 +21,17 @@
+ /*
+  * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
++ * Copyright 2011 Joyent, Inc.  All rights reserved.
+  */
+ 
+-#pragma ident	"%Z%%M%	%I%	%E% SMI"
+-
+ #include <procfs.h>
+ #include <project.h>
+ #include <stdlib.h>
+ #include <strings.h>
+ #include <zone.h>
+ #include <libzonecfg.h>
++#include <dirent.h>
++#include <libproc.h>
+ #include "rcapd.h"
+ #include "utils.h"
+ 
+@@ -39,6 +40,87 @@ extern boolean_t gz_capped;
+ 				/* round up to next y = 2^n */
+ #define	ROUNDUP(x, y)		(((x) + ((y) - 1)) & ~((y) - 1))
+ 
++static struct ps_prochandle *
++grab_zone_proc(zoneid_t zid)
++{
++	DIR *dirp;
++	struct dirent *dentp;
++	int pid, pid_self, tmp;
++	psinfo_t psinfo;
++	struct ps_prochandle *pr = NULL;
++
++	pid_self = getpid();
++
++	if ((dirp = opendir("/proc")) == NULL)
++		return (NULL);
++
++	while (dentp = readdir(dirp)) {
++		pid = atoi(dentp->d_name);
++
++		/* Skip self */
++		if (pid == pid_self)
++			continue;
++
++		if (proc_get_psinfo(pid, &psinfo) != 0)
++			continue;
++
++		if (psinfo.pr_zoneid != zid)
++			continue;
++
++		/* attempt to grab process */
++		if ((pr = Pgrab(pid, 0, &tmp)) != NULL) {
++			if (Psetflags(pr, PR_RLC) != 0) {
++				Prelease(pr, 0);
++			}
++			if (Pcreate_agent(pr) == 0) {
++				if (pr_getzoneid(pr) != zid) {
++					Prelease(pr, 0);
++					continue;
++				}
++
++				(void) closedir(dirp);
++				return (pr);
++			} else {
++				Prelease(pr, 0);
++			}
++		}
++	}
++
++	(void) closedir(dirp);
++	return (NULL);
++}
++
++static uint64_t
++get_zone_cap(zoneid_t zid)
++{
++	rctlblk_t *rblk;
++	uint64_t mcap;
++	struct ps_prochandle *pr;
++
++	if ((rblk = (rctlblk_t *)malloc(rctlblk_size())) == NULL)
++		return (UINT64_MAX);
++
++	if ((pr = grab_zone_proc(zid)) == NULL) {
++		free(rblk);
++		return (UINT64_MAX);
++	}
++
++	if (pr_getrctl(pr, "zone.max-physical-memory", NULL, rblk,
++	    RCTL_FIRST)) {
++		Pdestroy_agent(pr);
++		Prelease(pr, 0);
++		free(rblk);
++		return (UINT64_MAX);
++	}
++
++	Pdestroy_agent(pr);
++	Prelease(pr, 0);
++
++	mcap = rctlblk_get_value(rblk);
++	free(rblk);
++	return (mcap);
++}
++
+ static void
+ update_zone(zone_entry_t *zent, void *walk_data)
+ {
+@@ -50,8 +132,8 @@ update_zone(zone_entry_t *zent, void *walk_data)
+ 	lcollection_t *lcol;
+ 	rcid_t colid;
+ 
+-	if (zone_getattr(zent->zid, ZONE_ATTR_PHYS_MCAP, &mcap,
+-	    sizeof (mcap)) != -1 && mcap != 0)
++	mcap = get_zone_cap(zent->zid);
++	if (mcap != 0 && mcap != UINT64_MAX)
+ 		max_rss = ROUNDUP(mcap, 1024) / 1024;
+ 	else
+ 		max_rss = 0;
+diff --git a/usr/src/cmd/truss/print.c b/usr/src/cmd/truss/print.c
+index 72876bf..906d8d2 100644
+--- a/usr/src/cmd/truss/print.c
++++ b/usr/src/cmd/truss/print.c
+@@ -2446,7 +2446,10 @@ prt_zga(private_t *pri, int raw, long val)
+ 		case ZONE_ATTR_BOOTARGS:	s = "ZONE_ATTR_BOOTARGS"; break;
+ 		case ZONE_ATTR_BRAND:	s = "ZONE_ATTR_BRAND"; break;
+ 		case ZONE_ATTR_FLAGS:	s = "ZONE_ATTR_FLAGS"; break;
+-		case ZONE_ATTR_PHYS_MCAP: s = "ZONE_ATTR_PHYS_MCAP"; break;
++		case ZONE_ATTR_DID:	s = "ZONE_ATTR_DID"; break;
++		case ZONE_ATTR_PMCAP_NOVER: s = "ZONE_ATTR_PMCAP_NOVER"; break;
++		case ZONE_ATTR_PMCAP_PAGEOUT: s = "ZONE_ATTR_PMCAP_PAGEOUT";
++					break;
+ 		}
+ 	}
+ 
+diff --git a/usr/src/cmd/zoneadm/zoneadm.c b/usr/src/cmd/zoneadm/zoneadm.c
+index 21bc924..1435766 100644
+--- a/usr/src/cmd/zoneadm/zoneadm.c
++++ b/usr/src/cmd/zoneadm/zoneadm.c
+@@ -2842,6 +2842,18 @@ verify_details(int cmd_num, char *argv[])
+ 	if (verify_handle(cmd_num, handle, argv) != Z_OK)
+ 		return_code = Z_ERR;
+ 
++	if (cmd_num == CMD_READY || cmd_num == CMD_BOOT) {
++		int vcommit = 0, obscommit = 0;
++
++		vcommit = verify_fix_did(handle);
++		obscommit = zonecfg_fix_obsolete(handle);
++
++		if (vcommit || obscommit)
++			if (zonecfg_save(handle) != Z_OK)
++				(void) fprintf(stderr, gettext("Could not save "
++				    "updated configuration.\n"));
++	}
++
+ 	zonecfg_fini_handle(handle);
+ 	if (return_code == Z_ERR)
+ 		(void) fprintf(stderr,
+@@ -5375,7 +5387,7 @@ apply_func(int argc, char *argv[])
+ 	priv_set_t *privset;
+ 	zoneid_t zoneid;
+ 	zone_dochandle_t handle;
+-	struct zone_mcaptab mcap;
++	uint64_t mcap;
+ 	char pool_err[128];
+ 
+ 	zoneid = getzoneid();
+@@ -5466,19 +5478,12 @@ apply_func(int argc, char *argv[])
+ 	}
+ 
+ 	/*
+-	 * If a memory cap is configured, set the cap in the kernel using
+-	 * zone_setattr() and make sure the rcapd SMF service is enabled.
++	 * If a memory cap is configured, make sure the rcapd SMF service is
++	 * enabled.
+ 	 */
+-	if (zonecfg_getmcapent(handle, &mcap) == Z_OK) {
+-		uint64_t num;
++	if (zonecfg_get_aliased_rctl(handle, ALIAS_MAXPHYSMEM, &mcap) == Z_OK) {
+ 		char smf_err[128];
+ 
+-		num = (uint64_t)strtoll(mcap.zone_physmem_cap, NULL, 10);
+-		if (zone_setattr(zoneid, ZONE_ATTR_PHYS_MCAP, &num, 0) == -1) {
+-			zerror(gettext("could not set zone memory cap"));
+-			res = Z_ERR;
+-		}
+-
+ 		if (zonecfg_enable_rcapd(smf_err, sizeof (smf_err)) != Z_OK) {
+ 			zerror(gettext("enabling system/rcap service failed: "
+ 			    "%s"), smf_err);
+diff --git a/usr/src/cmd/zoneadmd/vplat.c b/usr/src/cmd/zoneadmd/vplat.c
+index 9d32485..0ddb5a8 100644
+--- a/usr/src/cmd/zoneadmd/vplat.c
++++ b/usr/src/cmd/zoneadmd/vplat.c
+@@ -4389,15 +4389,13 @@ duplicate_reachable_path(zlog_t *zlogp, const char *rootpath)
+ }
+ 
+ /*
+- * Set memory cap and pool info for the zone's resource management
+- * configuration.
++ * Set pool info for the zone's resource management configuration.
+  */
+ static int
+ setup_zone_rm(zlog_t *zlogp, char *zone_name, zoneid_t zoneid)
+ {
+ 	int res;
+ 	uint64_t tmp;
+-	struct zone_mcaptab mcap;
+ 	char sched[MAXNAMELEN];
+ 	zone_dochandle_t handle = NULL;
+ 	char pool_err[128];
+@@ -4413,29 +4411,6 @@ setup_zone_rm(zlog_t *zlogp, char *zone_name, zoneid_t zoneid)
+ 		return (res);
+ 	}
+ 
+-	/*
+-	 * If a memory cap is configured, set the cap in the kernel using
+-	 * zone_setattr() and make sure the rcapd SMF service is enabled.
+-	 */
+-	if (zonecfg_getmcapent(handle, &mcap) == Z_OK) {
+-		uint64_t num;
+-		char smf_err[128];
+-
+-		num = (uint64_t)strtoull(mcap.zone_physmem_cap, NULL, 10);
+-		if (zone_setattr(zoneid, ZONE_ATTR_PHYS_MCAP, &num, 0) == -1) {
+-			zerror(zlogp, B_TRUE, "could not set zone memory cap");
+-			zonecfg_fini_handle(handle);
+-			return (Z_INVAL);
+-		}
+-
+-		if (zonecfg_enable_rcapd(smf_err, sizeof (smf_err)) != Z_OK) {
+-			zerror(zlogp, B_FALSE, "enabling system/rcap service "
+-			    "failed: %s", smf_err);
+-			zonecfg_fini_handle(handle);
+-			return (Z_INVAL);
+-		}
+-	}
+-
+ 	/* Get the scheduling class set in the zone configuration. */
+ 	if (zonecfg_get_sched_class(handle, sched, sizeof (sched)) == Z_OK &&
+ 	    strlen(sched) > 0) {
+diff --git a/usr/src/cmd/zonecfg/zonecfg.c b/usr/src/cmd/zonecfg/zonecfg.c
+index 3dbec38..11843c5 100644
+--- a/usr/src/cmd/zonecfg/zonecfg.c
++++ b/usr/src/cmd/zonecfg/zonecfg.c
+@@ -579,7 +579,6 @@ static struct zone_rctltab	old_rctltab, in_progress_rctltab;
+ static struct zone_attrtab	old_attrtab, in_progress_attrtab;
+ static struct zone_dstab	old_dstab, in_progress_dstab;
+ static struct zone_psettab	old_psettab, in_progress_psettab;
+-static struct zone_mcaptab	old_mcaptab, in_progress_mcaptab;
+ static struct zone_admintab	old_admintab, in_progress_admintab;
+ 
+ static GetLine *gl;	/* The gl_get_line() resource object */
+@@ -1395,6 +1394,9 @@ initialize(boolean_t handle_expected)
+ 	if (zonecfg_check_handle(handle) != Z_OK) {
+ 		if ((err = zonecfg_get_handle(zone, handle)) == Z_OK) {
+ 			got_handle = B_TRUE;
++
++			(void) zonecfg_fix_obsolete(handle);
++
+ 			if (zonecfg_get_brand(handle, brandname,
+ 			    sizeof (brandname)) != Z_OK) {
+ 				zerr("Zone %s is inconsistent: missing "
+@@ -1797,7 +1799,6 @@ export_func(cmd_t *cmd)
+ 	struct zone_rctltab rctltab;
+ 	struct zone_dstab dstab;
+ 	struct zone_psettab psettab;
+-	struct zone_mcaptab mcaptab;
+ 	struct zone_rctlvaltab *valptr;
+ 	struct zone_admintab admintab;
+ 	int err, arg;
+@@ -1985,17 +1986,6 @@ export_func(cmd_t *cmd)
+ 	}
+ 	(void) zonecfg_enddevent(handle);
+ 
+-	if (zonecfg_getmcapent(handle, &mcaptab) == Z_OK) {
+-		char buf[128];
+-
+-		(void) fprintf(of, "%s %s\n", cmd_to_str(CMD_ADD),
+-		    rt_to_str(RT_MCAP));
+-		bytes_to_units(mcaptab.zone_physmem_cap, buf, sizeof (buf));
+-		(void) fprintf(of, "%s %s=%s\n", cmd_to_str(CMD_SET),
+-		    pt_to_str(PT_PHYSICAL), buf);
+-		(void) fprintf(of, "%s\n", cmd_to_str(CMD_END));
+-	}
+-
+ 	if ((err = zonecfg_setrctlent(handle)) != Z_OK) {
+ 		zone_perror(zone, err, B_FALSE);
+ 		goto done;
+@@ -2149,7 +2139,6 @@ add_resource(cmd_t *cmd)
+ {
+ 	int type;
+ 	struct zone_psettab tmp_psettab;
+-	struct zone_mcaptab tmp_mcaptab;
+ 	uint64_t tmp;
+ 	uint64_t tmp_mcap;
+ 	char pool[MAXNAMELEN];
+@@ -2241,9 +2230,10 @@ add_resource(cmd_t *cmd)
+ 		 * Make sure there isn't already a mem-cap entry or max-swap
+ 		 * or max-locked rctl.
+ 		 */
+-		if (zonecfg_lookup_mcap(handle, &tmp_mcaptab) == Z_OK ||
+-		    zonecfg_get_aliased_rctl(handle, ALIAS_MAXSWAP, &tmp_mcap)
+-		    == Z_OK ||
++		if (zonecfg_get_aliased_rctl(handle, ALIAS_MAXSWAP,
++		    &tmp_mcap) == Z_OK ||
++		    zonecfg_get_aliased_rctl(handle, ALIAS_MAXPHYSMEM,
++		    &tmp_mcap) == Z_OK ||
+ 		    zonecfg_get_aliased_rctl(handle, ALIAS_MAXLOCKEDMEM,
+ 		    &tmp_mcap) == Z_OK) {
+ 			zerr(gettext("The %s resource or a related resource "
+@@ -2256,7 +2246,6 @@ add_resource(cmd_t *cmd)
+ 			    "to even the root user; "
+ 			    "this could render the system impossible\n"
+ 			    "to administer.  Please use caution."));
+-		bzero(&in_progress_mcaptab, sizeof (in_progress_mcaptab));
+ 		return;
+ 	case RT_ADMIN:
+ 		bzero(&in_progress_admintab, sizeof (in_progress_admintab));
+@@ -3246,10 +3235,9 @@ remove_mcap()
+ {
+ 	int err, res1, res2, res3;
+ 	uint64_t tmp;
+-	struct zone_mcaptab mcaptab;
+ 	boolean_t revert = B_FALSE;
+ 
+-	res1 = zonecfg_lookup_mcap(handle, &mcaptab);
++	res1 = zonecfg_get_aliased_rctl(handle, ALIAS_MAXPHYSMEM, &tmp);
+ 	res2 = zonecfg_get_aliased_rctl(handle, ALIAS_MAXSWAP, &tmp);
+ 	res3 = zonecfg_get_aliased_rctl(handle, ALIAS_MAXLOCKEDMEM, &tmp);
+ 
+@@ -3261,13 +3249,15 @@ remove_mcap()
+ 		return;
+ 	}
+ 	if (res1 == Z_OK) {
+-		if ((err = zonecfg_delete_mcap(handle)) != Z_OK) {
++		if ((err = zonecfg_rm_aliased_rctl(handle, ALIAS_MAXPHYSMEM))
++		    != Z_OK) {
+ 			z_cmd_rt_perror(CMD_REMOVE, RT_MCAP, err, B_TRUE);
+ 			revert = B_TRUE;
+ 		} else {
+ 			need_to_commit = B_TRUE;
+ 		}
+ 	}
++
+ 	if (res2 == Z_OK) {
+ 		if ((err = zonecfg_rm_aliased_rctl(handle, ALIAS_MAXSWAP))
+ 		    != Z_OK) {
+@@ -3596,8 +3586,7 @@ clear_property(cmd_t *cmd)
+ 	case RT_MCAP:
+ 		switch (prop_type) {
+ 		case PT_PHYSICAL:
+-			in_progress_mcaptab.zone_physmem_cap[0] = '\0';
+-			need_to_commit = B_TRUE;
++			remove_aliased_rctl(PT_PHYSICAL, ALIAS_MAXPHYSMEM);
+ 			return;
+ 		case PT_SWAP:
+ 			remove_aliased_rctl(PT_SWAP, ALIAS_MAXSWAP);
+@@ -3739,7 +3728,7 @@ clear_func(cmd_t *cmd)
+ void
+ select_func(cmd_t *cmd)
+ {
+-	int type, err, res;
++	int type, err;
+ 	uint64_t limit;
+ 	uint64_t tmp;
+ 
+@@ -3834,7 +3823,8 @@ select_func(cmd_t *cmd)
+ 		return;
+ 	case RT_MCAP:
+ 		/* if none of these exist, there is no resource to select */
+-		if ((res = zonecfg_lookup_mcap(handle, &old_mcaptab)) != Z_OK &&
++		if (zonecfg_get_aliased_rctl(handle, ALIAS_MAXPHYSMEM, &limit)
++		    != Z_OK &&
+ 		    zonecfg_get_aliased_rctl(handle, ALIAS_MAXSWAP, &limit)
+ 		    != Z_OK &&
+ 		    zonecfg_get_aliased_rctl(handle, ALIAS_MAXLOCKEDMEM, &limit)
+@@ -3843,12 +3833,6 @@ select_func(cmd_t *cmd)
+ 			    B_TRUE);
+ 			global_scope = B_TRUE;
+ 		}
+-		if (res == Z_OK)
+-			bcopy(&old_mcaptab, &in_progress_mcaptab,
+-			    sizeof (struct zone_mcaptab));
+-		else
+-			bzero(&in_progress_mcaptab,
+-			    sizeof (in_progress_mcaptab));
+ 		return;
+ 	case RT_ADMIN:
+ 		if ((err = fill_in_admintab(cmd, &old_admintab, B_FALSE))
+@@ -4115,7 +4099,6 @@ set_func(cmd_t *cmd)
+ 	boolean_t autoboot;
+ 	zone_iptype_t iptype;
+ 	boolean_t force_set = B_FALSE;
+-	size_t physmem_size = sizeof (in_progress_mcaptab.zone_physmem_cap);
+ 	uint64_t mem_cap, mem_limit;
+ 	float cap;
+ 	char *unitp;
+@@ -4667,18 +4650,30 @@ set_func(cmd_t *cmd)
+ 	case RT_MCAP:
+ 		switch (prop_type) {
+ 		case PT_PHYSICAL:
++			/*
++			 * We have to check if an rctl is allowed here since
++			 * there might already be a rctl defined that blocks
++			 * the alias.
++			 */
++			if (!zonecfg_aliased_rctl_ok(handle,
++			    ALIAS_MAXPHYSMEM)) {
++				zone_perror(pt_to_str(PT_LOCKED),
++				    Z_ALIAS_DISALLOW, B_FALSE);
++				saw_error = B_TRUE;
++				return;
++			}
++
+ 			if (!zonecfg_valid_memlimit(prop_id, &mem_cap)) {
+-				zerr(gettext("A positive number with a "
++				zerr(gettext("A non-negative number with a "
+ 				    "required scale suffix (K, M, G or T) was "
+-				    "expected here."));
+-				saw_error = B_TRUE;
+-			} else if (mem_cap < ONE_MB) {
+-				zerr(gettext("%s value is too small.  It must "
+-				    "be at least 1M."), pt_to_str(PT_PHYSICAL));
++				    "expected\nhere."));
+ 				saw_error = B_TRUE;
+ 			} else {
+-				snprintf(in_progress_mcaptab.zone_physmem_cap,
+-				    physmem_size, "%llu", mem_cap);
++				if ((err = zonecfg_set_aliased_rctl(handle,
++				    ALIAS_MAXPHYSMEM, mem_cap)) != Z_OK)
++					zone_perror(zone, err, B_TRUE);
++				else
++					need_to_commit = B_TRUE;
+ 			}
+ 			break;
+ 		case PT_SWAP:
+@@ -5339,15 +5334,18 @@ bytes_to_units(char *str, char *buf, int bufsize)
+ }
+ 
+ static void
+-output_mcap(FILE *fp, struct zone_mcaptab *mcaptab, int showswap,
++output_mcap(FILE *fp, int showphys, uint64_t maxphys, int showswap,
+     uint64_t maxswap, int showlocked, uint64_t maxlocked)
+ {
+ 	char buf[128];
+ 
+ 	(void) fprintf(fp, "%s:\n", rt_to_str(RT_MCAP));
+-	if (mcaptab->zone_physmem_cap[0] != '\0') {
+-		bytes_to_units(mcaptab->zone_physmem_cap, buf, sizeof (buf));
+-		output_prop(fp, PT_PHYSICAL, buf, B_TRUE);
++
++	if (showphys == Z_OK) {
++		(void) snprintf(buf, sizeof (buf), "%llu", maxphys);
++		bytes_to_units(buf, buf, sizeof (buf));
++		/* Print directly since "physical" also is a net property. */
++		(void) fprintf(fp, "\t[%s: %s]\n", pt_to_str(PT_PHYSICAL), buf);
+ 	}
+ 
+ 	if (showswap == Z_OK) {
+@@ -5369,16 +5367,16 @@ info_mcap(zone_dochandle_t handle, FILE *fp)
+ 	int res1, res2, res3;
+ 	uint64_t swap_limit;
+ 	uint64_t locked_limit;
+-	struct zone_mcaptab lookup;
++	uint64_t phys_limit;
+ 
+-	bzero(&lookup, sizeof (lookup));
+-	res1 = zonecfg_getmcapent(handle, &lookup);
++	res1 = zonecfg_get_aliased_rctl(handle, ALIAS_MAXPHYSMEM, &phys_limit);
+ 	res2 = zonecfg_get_aliased_rctl(handle, ALIAS_MAXSWAP, &swap_limit);
+ 	res3 = zonecfg_get_aliased_rctl(handle, ALIAS_MAXLOCKEDMEM,
+ 	    &locked_limit);
+ 
+ 	if (res1 == Z_OK || res2 == Z_OK || res3 == Z_OK)
+-		output_mcap(fp, &lookup, res2, swap_limit, res3, locked_limit);
++		output_mcap(fp, res1, phys_limit, res2, swap_limit,
++		    res3, locked_limit);
+ }
+ 
+ static void
+@@ -5429,9 +5427,11 @@ info_func(cmd_t *cmd)
+ 	FILE *fp = stdout;
+ 	boolean_t need_to_close = B_FALSE;
+ 	int type;
+-	int res1, res2;
++	int res1, res2, res3;
+ 	uint64_t swap_limit;
+ 	uint64_t locked_limit;
++	uint64_t phys_limit;
++	struct stat statbuf;
+ 
+ 	assert(cmd != NULL);
+ 
+@@ -5479,7 +5479,9 @@ info_func(cmd_t *cmd)
+ 			    &swap_limit);
+ 			res2 = zonecfg_get_aliased_rctl(handle,
+ 			    ALIAS_MAXLOCKEDMEM, &locked_limit);
+-			output_mcap(fp, &in_progress_mcaptab, res1, swap_limit,
++			res3 = zonecfg_get_aliased_rctl(handle,
++			    ALIAS_MAXPHYSMEM, &phys_limit);
++			output_mcap(fp, res3, phys_limit, res1, swap_limit,
+ 			    res2, locked_limit);
+ 			break;
+ 		case RT_ADMIN:
+@@ -6275,6 +6277,7 @@ end_func(cmd_t *cmd)
+ 	int err, arg, res1, res2, res3;
+ 	uint64_t swap_limit;
+ 	uint64_t locked_limit;
++	uint64_t phys_limit;
+ 	uint64_t proc_cap;
+ 
+ 	assert(cmd != NULL);
+@@ -6578,8 +6581,8 @@ end_func(cmd_t *cmd)
+ 		break;
+ 	case RT_MCAP:
+ 		/* Make sure everything was filled in. */
+-		res1 = strlen(in_progress_mcaptab.zone_physmem_cap) == 0 ?
+-		    Z_ERR : Z_OK;
++		res1 = zonecfg_get_aliased_rctl(handle, ALIAS_MAXPHYSMEM,
++		    &phys_limit);
+ 		res2 = zonecfg_get_aliased_rctl(handle, ALIAS_MAXSWAP,
+ 		    &swap_limit);
+ 		res3 = zonecfg_get_aliased_rctl(handle, ALIAS_MAXLOCKEDMEM,
+@@ -6595,11 +6598,6 @@ end_func(cmd_t *cmd)
+ 
+ 		/* if phys & locked are both set, verify locked <= phys */
+ 		if (res1 == Z_OK && res3 == Z_OK) {
+-			uint64_t phys_limit;
+-			char *endp;
+-
+-			phys_limit = strtoull(
+-			    in_progress_mcaptab.zone_physmem_cap, &endp, 10);
+ 			if (phys_limit < locked_limit) {
+ 				zerr(gettext("The %s cap must be less than or "
+ 				    "equal to the %s cap."),
+@@ -6611,23 +6609,6 @@ end_func(cmd_t *cmd)
+ 		}
+ 
+ 		err = Z_OK;
+-		if (res1 == Z_OK) {
+-			/*
+-			 * We could be ending from either an add operation
+-			 * or a select operation.  Since all of the properties
+-			 * within this resource are optional, we always use
+-			 * modify on the mcap entry.  zonecfg_modify_mcap()
+-			 * will handle both adding and modifying a memory cap.
+-			 */
+-			err = zonecfg_modify_mcap(handle, &in_progress_mcaptab);
+-		} else if (end_op == CMD_SELECT) {
+-			/*
+-			 * If we're ending from a select and the physical
+-			 * memory cap is empty then the user could have cleared
+-			 * the physical cap value, so try to delete the entry.
+-			 */
+-			(void) zonecfg_delete_mcap(handle);
+-		}
+ 		break;
+ 	case RT_ADMIN:
+ 		/* First make sure everything was filled in. */
+diff --git a/usr/src/cmd/zonestat/zonestatd/zonestatd.c b/usr/src/cmd/zonestat/zonestatd/zonestatd.c
+index b764551..6c293bc 100644
+--- a/usr/src/cmd/zonestat/zonestatd/zonestatd.c
++++ b/usr/src/cmd/zonestat/zonestatd/zonestatd.c
+@@ -21,6 +21,7 @@
+ 
+ /*
+  * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2011, Joyent, Inc. All rights reserved.
+  */
+ #include <alloca.h>
+ #include <assert.h>
+@@ -2190,7 +2191,7 @@ zsd_get_zone_rctl_usage(char *name)
+ 	return (rctlblk_get_value(rblk));
+ }
+ 
+-#define	ZSD_NUM_RCTL_VALS 19
++#define	ZSD_NUM_RCTL_VALS 20
+ 
+ /*
+  * Fetch the limit information for a zone.  This uses zone_enter() as the
+@@ -2237,12 +2238,6 @@ zsd_get_zone_caps(zsd_ctl_t *ctl, zsd_zone_t *zone, uint64_t *cpu_shares,
+ 	*msgids = 0;
+ 	*lofi = 0;
+ 
+-	/* Get the ram cap first since it is a zone attr */
+-	ret = zone_getattr(zone->zsz_id, ZONE_ATTR_PHYS_MCAP,
+-	    ram_cap, sizeof (*ram_cap));
+-	if (ret < 0 || *ram_cap == 0)
+-		*ram_cap = ZS_LIMIT_NONE;
+-
+ 	/* Get the zone's default scheduling class */
+ 	ret = zone_getattr(zone->zsz_id, ZONE_ATTR_SCHED_CLASS,
+ 	    class, sizeof (class));
+@@ -2298,6 +2293,7 @@ zsd_get_zone_caps(zsd_ctl_t *ctl, zsd_zone_t *zone, uint64_t *cpu_shares,
+ 		vals[i++] = zsd_get_zone_rctl_usage("zone.max-msg-ids");
+ 		vals[i++] = zsd_get_zone_rctl_limit("zone.max-lofi");
+ 		vals[i++] = zsd_get_zone_rctl_usage("zone.max-lofi");
++		vals[i++] = zsd_get_zone_rctl_usage("zone.max-physical-memory");
+ 
+ 		if (write(p[1], vals, ZSD_NUM_RCTL_VALS * sizeof (uint64_t)) !=
+ 		    ZSD_NUM_RCTL_VALS * sizeof (uint64_t)) {
+@@ -2342,6 +2338,7 @@ zsd_get_zone_caps(zsd_ctl_t *ctl, zsd_zone_t *zone, uint64_t *cpu_shares,
+ 	*msgids = vals[i++];
+ 	*lofi_cap = vals[i++];
+ 	*lofi = vals[i++];
++	*ram_cap = vals[i++];
+ 
+ 	/* Interpret maximum values as no cap */
+ 	if (*cpu_cap == UINT32_MAX || *cpu_cap == 0)
+diff --git a/usr/src/head/libzonecfg.h b/usr/src/head/libzonecfg.h
+index d41dbb0..cb6cec1 100644
+--- a/usr/src/head/libzonecfg.h
++++ b/usr/src/head/libzonecfg.h
+@@ -150,6 +150,7 @@ extern "C" {
+ #define	ALIAS_MAXSEMIDS		"max-sem-ids"
+ #define	ALIAS_MAXLOCKEDMEM	"locked"
+ #define	ALIAS_MAXSWAP		"swap"
++#define	ALIAS_MAXPHYSMEM	"physical"
+ #define	ALIAS_SHARES		"cpu-shares"
+ #define	ALIAS_CPUCAP		"cpu-cap"
+ #define	ALIAS_MAXPROCS		"max-processes"
+@@ -230,10 +231,6 @@ struct zone_psettab {
+ 	char	zone_importance[MAXNAMELEN];
+ };
+ 
+-struct zone_mcaptab {
+-	char	zone_physmem_cap[MAXNAMELEN];
+-};
+-
+ struct zone_pkgtab {
+ 	char	zone_pkg_name[MAXNAMELEN];
+ 	char	zone_pkg_version[ZONE_PKG_VERSMAX];
+@@ -422,13 +419,6 @@ extern	int	zonecfg_modify_pset(zone_dochandle_t, struct zone_psettab *);
+ extern	int	zonecfg_lookup_pset(zone_dochandle_t, struct zone_psettab *);
+ 
+ /*
+- * mem-cap configuration.
+- */
+-extern	int	zonecfg_delete_mcap(zone_dochandle_t);
+-extern	int	zonecfg_modify_mcap(zone_dochandle_t, struct zone_mcaptab *);
+-extern	int	zonecfg_lookup_mcap(zone_dochandle_t, struct zone_mcaptab *);
+-
+-/*
+  * Temporary pool support functions.
+  */
+ extern	int	zonecfg_destroy_tmp_pool(char *, char *, int);
+@@ -485,7 +475,6 @@ extern	int	zonecfg_setdsent(zone_dochandle_t);
+ extern	int	zonecfg_getdsent(zone_dochandle_t, struct zone_dstab *);
+ extern	int	zonecfg_enddsent(zone_dochandle_t);
+ extern	int	zonecfg_getpsetent(zone_dochandle_t, struct zone_psettab *);
+-extern	int	zonecfg_getmcapent(zone_dochandle_t, struct zone_mcaptab *);
+ extern	int	zonecfg_getpkgdata(zone_dochandle_t, uu_avl_pool_t *,
+     uu_avl_t *);
+ extern	int	zonecfg_setdevperment(zone_dochandle_t);
+@@ -518,6 +507,7 @@ extern	char	*zone_state_str(zone_state_t);
+ extern	int	zonecfg_get_name_by_uuid(const uuid_t, char *, size_t);
+ extern	int	zonecfg_get_uuid(const char *, uuid_t);
+ extern	int	zonecfg_default_brand(char *, size_t);
++extern	int	zonecfg_fix_obsolete(zone_dochandle_t);
+ 
+ /*
+  * Iterator for configured zones.
+diff --git a/usr/src/lib/libzonecfg/common/libzonecfg.c b/usr/src/lib/libzonecfg/common/libzonecfg.c
+index 91502b6..054b239 100644
+--- a/usr/src/lib/libzonecfg/common/libzonecfg.c
++++ b/usr/src/lib/libzonecfg/common/libzonecfg.c
+@@ -176,6 +176,8 @@ static struct alias {
+ 	{ALIAS_MAXSEMIDS, "zone.max-sem-ids", "privileged", "deny", 0},
+ 	{ALIAS_MAXLOCKEDMEM, "zone.max-locked-memory", "privileged", "deny", 0},
+ 	{ALIAS_MAXSWAP, "zone.max-swap", "privileged", "deny", 0},
++	{ALIAS_MAXPHYSMEM, "zone.max-physical-memory", "privileged", "deny",
++	    1048576},
+ 	{ALIAS_SHARES, "zone.cpu-shares", "privileged", "none", 0},
+ 	{ALIAS_CPUCAP, "zone.cpu-cap", "privileged", "deny", 0},
+ 	{ALIAS_MAXPROCS, "zone.max-processes", "privileged", "deny", 100},
+@@ -6839,131 +6841,49 @@ zonecfg_getpsetent(zone_dochandle_t handle, struct zone_psettab *tabptr)
+ 	return (err);
+ }
+ 
+-static int
+-add_mcap(zone_dochandle_t handle, struct zone_mcaptab *tabptr)
+-{
+-	xmlNodePtr newnode, cur = handle->zone_dh_cur;
+-	int err;
+-
+-	newnode = xmlNewTextChild(cur, NULL, DTD_ELEM_MCAP, NULL);
+-	if ((err = newprop(newnode, DTD_ATTR_PHYSCAP, tabptr->zone_physmem_cap))
+-	    != Z_OK)
+-		return (err);
+-
+-	return (Z_OK);
+-}
+-
+-int
+-zonecfg_delete_mcap(zone_dochandle_t handle)
+-{
+-	int err;
+-	xmlNodePtr cur = handle->zone_dh_cur;
+-
+-	if ((err = operation_prep(handle)) != Z_OK)
+-		return (err);
+-
+-	for (cur = cur->xmlChildrenNode; cur != NULL; cur = cur->next) {
+-		if (xmlStrcmp(cur->name, DTD_ELEM_MCAP) != 0)
+-			continue;
+-
+-		xmlUnlinkNode(cur);
+-		xmlFreeNode(cur);
+-		return (Z_OK);
+-	}
+-	return (Z_NO_RESOURCE_ID);
+-}
+-
+-int
+-zonecfg_modify_mcap(zone_dochandle_t handle, struct zone_mcaptab *tabptr)
+-{
+-	int err;
+-
+-	if (tabptr == NULL)
+-		return (Z_INVAL);
+-
+-	err = zonecfg_delete_mcap(handle);
+-	/* it is ok if there is no mcap entry */
+-	if (err != Z_OK && err != Z_NO_RESOURCE_ID)
+-		return (err);
+-
+-	if ((err = add_mcap(handle, tabptr)) != Z_OK)
+-		return (err);
+-
+-	return (Z_OK);
+-}
+-
++/*
++ * Cleanup obsolete constructs in the configuration.
++ * Return true of the config has been updated and must be commited.
++ */
+ int
+-zonecfg_lookup_mcap(zone_dochandle_t handle, struct zone_mcaptab *tabptr)
++zonecfg_fix_obsolete(zone_dochandle_t handle)
+ {
++	int res = 0;
++	int add_physmem_rctl = 0;
+ 	xmlNodePtr cur;
+-	int err;
+-
+-	if (tabptr == NULL)
+-		return (Z_INVAL);
++	char	zone_physmem_cap[MAXNAMELEN];
+ 
+-	if ((err = operation_prep(handle)) != Z_OK)
+-		return (err);
++	if (operation_prep(handle) != Z_OK)
++		return (res);
+ 
++	/*
++	 * If an obsolete mcap entry exists, convert it to the rctl.
++	 */
+ 	cur = handle->zone_dh_cur;
+ 	for (cur = cur->xmlChildrenNode; cur != NULL; cur = cur->next) {
+ 		if (xmlStrcmp(cur->name, DTD_ELEM_MCAP) != 0)
+ 			continue;
+-		if ((err = fetchprop(cur, DTD_ATTR_PHYSCAP,
+-		    tabptr->zone_physmem_cap,
+-		    sizeof (tabptr->zone_physmem_cap))) != Z_OK) {
+-			handle->zone_dh_cur = handle->zone_dh_top;
+-			return (err);
++
++		if (fetchprop(cur, DTD_ATTR_PHYSCAP,
++		    zone_physmem_cap, sizeof (zone_physmem_cap)) == Z_OK) {
++			res = 1;
++			add_physmem_rctl = 1;
+ 		}
+ 
+-		return (Z_OK);
++		xmlUnlinkNode(cur);
++		xmlFreeNode(cur);
++		break;
+ 	}
+ 
+-	return (Z_NO_ENTRY);
+-}
+-
+-static int
+-getmcapent_core(zone_dochandle_t handle, struct zone_mcaptab *tabptr)
+-{
+-	xmlNodePtr cur;
+-	int err;
+-
+-	if (handle == NULL)
+-		return (Z_INVAL);
+-
+-	if ((cur = handle->zone_dh_cur) == NULL)
+-		return (Z_NO_ENTRY);
+-
+-	for (; cur != NULL; cur = cur->next)
+-		if (xmlStrcmp(cur->name, DTD_ELEM_MCAP) == 0)
+-			break;
+-	if (cur == NULL) {
+-		handle->zone_dh_cur = handle->zone_dh_top;
+-		return (Z_NO_ENTRY);
+-	}
++	if (add_physmem_rctl) {
++		uint64_t cap;
++		char *endp;
+ 
+-	if ((err = fetchprop(cur, DTD_ATTR_PHYSCAP, tabptr->zone_physmem_cap,
+-	    sizeof (tabptr->zone_physmem_cap))) != Z_OK) {
+-		handle->zone_dh_cur = handle->zone_dh_top;
+-		return (err);
++		cap = strtoull(zone_physmem_cap, &endp, 10);
++		(void) zonecfg_set_aliased_rctl(handle, ALIAS_MAXPHYSMEM, cap);
+ 	}
+ 
+-	handle->zone_dh_cur = cur->next;
+-	return (Z_OK);
+-}
+-
+-int
+-zonecfg_getmcapent(zone_dochandle_t handle, struct zone_mcaptab *tabptr)
+-{
+-	int err;
+-
+-	if ((err = zonecfg_setent(handle)) != Z_OK)
+-		return (err);
+-
+-	err = getmcapent_core(handle, tabptr);
+-
+-	(void) zonecfg_endent(handle);
+-
+-	return (err);
++	return (res);
+ }
+ 
+ /*
+diff --git a/usr/src/lib/libzonecfg/common/mapfile-vers b/usr/src/lib/libzonecfg/common/mapfile-vers
+index b908a28..191cadb 100644
+--- a/usr/src/lib/libzonecfg/common/mapfile-vers
++++ b/usr/src/lib/libzonecfg/common/mapfile-vers
+@@ -79,7 +79,6 @@ SYMBOL_VERSION SUNWprivate_1.1 {
+ 	zonecfg_delete_dev;
+ 	zonecfg_delete_ds;
+ 	zonecfg_delete_filesystem;
+-	zonecfg_delete_mcap;
+ 	zonecfg_delete_nwif;
+ 	zonecfg_delete_pset;
+ 	zonecfg_delete_rctl;
+@@ -104,6 +103,7 @@ SYMBOL_VERSION SUNWprivate_1.1 {
+ 	zonecfg_find_mounts;
+ 	zonecfg_find_scratch;
+ 	zonecfg_fini_handle;
++	zonecfg_fix_obsolete;
+ 	zonecfg_free_fs_option_list;
+ 	zonecfg_free_rctl_value_list;
+ 	zonecfg_get_aliased_rctl;
+@@ -127,7 +127,6 @@ SYMBOL_VERSION SUNWprivate_1.1 {
+ 	zonecfg_get_hostid;
+ 	zonecfg_get_iptype;
+ 	zonecfg_get_limitpriv;
+-	zonecfg_getmcapent;
+ 	zonecfg_get_name;
+ 	zonecfg_get_name_by_uuid;
+ 	zonecfg_getnwifent;
+@@ -160,7 +159,6 @@ SYMBOL_VERSION SUNWprivate_1.1 {
+ 	zonecfg_lookup_dev;
+ 	zonecfg_lookup_ds;
+ 	zonecfg_lookup_filesystem;
+-	zonecfg_lookup_mcap;
+ 	zonecfg_lookup_nwif;
+ 	zonecfg_lookup_pset;
+ 	zonecfg_lookup_rctl;
+@@ -169,7 +167,6 @@ SYMBOL_VERSION SUNWprivate_1.1 {
+ 	zonecfg_modify_dev;
+ 	zonecfg_modify_ds;
+ 	zonecfg_modify_filesystem;
+-	zonecfg_modify_mcap;
+ 	zonecfg_modify_nwif;
+ 	zonecfg_modify_pset;
+ 	zonecfg_modify_rctl;
+diff --git a/usr/src/uts/common/os/zone.c b/usr/src/uts/common/os/zone.c
+index c642ec1..e919f39 100644
+--- a/usr/src/uts/common/os/zone.c
++++ b/usr/src/uts/common/os/zone.c
+@@ -370,6 +370,7 @@ static char *zone_ref_subsys_names[] = {
+ rctl_hndl_t rc_zone_cpu_shares;
+ rctl_hndl_t rc_zone_locked_mem;
+ rctl_hndl_t rc_zone_max_swap;
++rctl_hndl_t rc_zone_phys_mem;
+ rctl_hndl_t rc_zone_max_lofi;
+ rctl_hndl_t rc_zone_cpu_cap;
+ rctl_hndl_t rc_zone_zfs_io_pri;
+@@ -1710,6 +1711,39 @@ static rctl_ops_t zone_max_swap_ops = {
+ 
+ /*ARGSUSED*/
+ static rctl_qty_t
++zone_phys_mem_usage(rctl_t *rctl, struct proc *p)
++{
++	rctl_qty_t q;
++	zone_t *z = p->p_zone;
++
++	ASSERT(MUTEX_HELD(&p->p_lock));
++	/* No additional lock because not enforced in the kernel */
++	q = z->zone_phys_mem;
++	return (q);
++}
++
++/*ARGSUSED*/
++static int
++zone_phys_mem_set(rctl_t *rctl, struct proc *p, rctl_entity_p_t *e,
++    rctl_qty_t nv)
++{
++	ASSERT(MUTEX_HELD(&p->p_lock));
++	ASSERT(e->rcep_t == RCENTITY_ZONE);
++	if (e->rcep_p.zone == NULL)
++		return (0);
++	e->rcep_p.zone->zone_phys_mem_ctl = nv;
++	return (0);
++}
++
++static rctl_ops_t zone_phys_mem_ops = {
++	rcop_no_action,
++	zone_phys_mem_usage,
++	zone_phys_mem_set,
++	rcop_no_test
++};
++
++/*ARGSUSED*/
++static rctl_qty_t
+ zone_max_lofi_usage(rctl_t *rctl, struct proc *p)
+ {
+ 	rctl_qty_t q;
+@@ -1803,6 +1837,20 @@ zone_lockedmem_kstat_update(kstat_t *ksp, int rw)
+ }
+ 
+ static int
++zone_physmem_kstat_update(kstat_t *ksp, int rw)
++{
++	zone_t *zone = ksp->ks_private;
++	zone_kstat_t *zk = ksp->ks_data;
++
++	if (rw == KSTAT_WRITE)
++		return (EACCES);
++
++	zk->zk_usage.value.ui64 = zone->zone_phys_mem;
++	zk->zk_value.value.ui64 = zone->zone_phys_mem_ctl;
++	return (0);
++}
++
++static int
+ zone_nprocs_kstat_update(kstat_t *ksp, int rw)
+ {
+ 	zone_t *zone = ksp->ks_private;
+@@ -1996,6 +2044,54 @@ zone_misc_kstat_create(zone_t *zone)
+ 	return (ksp);
+ }
+ 
++static int
++zone_mcap_kstat_update(kstat_t *ksp, int rw)
++{
++	zone_t *zone = ksp->ks_private;
++	zone_mcap_kstat_t *zmp = ksp->ks_data;
++
++	if (rw == KSTAT_WRITE)
++		return (EACCES);
++
++	zmp->zm_rss.value.ui64 = zone->zone_phys_mem;
++	zmp->zm_swap.value.ui64 = zone->zone_max_swap;
++	zmp->zm_nover.value.ui64 = zone->zone_mcap_nover;
++	zmp->zm_pagedout.value.ui64 = zone->zone_mcap_pagedout;
++
++	return (0);
++}
++
++static kstat_t *
++zone_mcap_kstat_create(zone_t *zone)
++{
++	kstat_t *ksp;
++	zone_mcap_kstat_t *zmp;
++
++	if ((ksp = kstat_create_zone("memory_cap", zone->zone_id,
++	    zone->zone_name, "zone_memory_cap", KSTAT_TYPE_NAMED,
++	    sizeof (zone_mcap_kstat_t) / sizeof (kstat_named_t),
++	    KSTAT_FLAG_VIRTUAL, zone->zone_id)) == NULL)
++		return (NULL);
++
++	if (zone->zone_id != GLOBAL_ZONEID)
++		kstat_zone_add(ksp, GLOBAL_ZONEID);
++
++	zmp = ksp->ks_data = kmem_zalloc(sizeof (zone_mcap_kstat_t), KM_SLEEP);
++	ksp->ks_lock = &zone->zone_mcap_lock;
++	zone->zone_mcap_stats = zmp;
++
++	kstat_named_init(&zmp->zm_rss, "rss", KSTAT_DATA_UINT64);
++	kstat_named_init(&zmp->zm_swap, "swap", KSTAT_DATA_UINT64);
++	kstat_named_init(&zmp->zm_nover, "nover", KSTAT_DATA_UINT64);
++	kstat_named_init(&zmp->zm_pagedout, "pagedout", KSTAT_DATA_UINT64);
++
++	ksp->ks_update = zone_mcap_kstat_update;
++	ksp->ks_private = zone;
++
++	kstat_install(ksp);
++	return (ksp);
++}
++
+ static void
+ zone_kstat_create(zone_t *zone)
+ {
+@@ -2003,6 +2099,8 @@ zone_kstat_create(zone_t *zone)
+ 	    "lockedmem", zone_lockedmem_kstat_update);
+ 	zone->zone_swapresv_kstat = zone_kstat_create_common(zone,
+ 	    "swapresv", zone_swapresv_kstat_update);
++	zone->zone_physmem_kstat = zone_kstat_create_common(zone,
++	    "physicalmem", zone_physmem_kstat_update);
+ 	zone->zone_nprocs_kstat = zone_kstat_create_common(zone,
+ 	    "nprocs", zone_nprocs_kstat_update);
+ 
+@@ -2015,6 +2113,11 @@ zone_kstat_create(zone_t *zone)
+ 		zone->zone_misc_stats = kmem_zalloc(
+ 		    sizeof (zone_misc_kstat_t), KM_SLEEP);
+ 	}
++
++	if ((zone->zone_mcap_ksp = zone_mcap_kstat_create(zone)) == NULL) {
++		zone->zone_mcap_stats = kmem_zalloc(
++		    sizeof (zone_mcap_kstat_t), KM_SLEEP);
++	}
+ }
+ 
+ static void
+@@ -2037,6 +2140,8 @@ zone_kstat_delete(zone_t *zone)
+ 	    sizeof (zone_kstat_t));
+ 	zone_kstat_delete_common(&zone->zone_swapresv_kstat,
+ 	    sizeof (zone_kstat_t));
++	zone_kstat_delete_common(&zone->zone_physmem_kstat,
++	    sizeof (zone_kstat_t));
+ 	zone_kstat_delete_common(&zone->zone_nprocs_kstat,
+ 	    sizeof (zone_kstat_t));
+ 	zone_kstat_delete_common(&zone->zone_mcap_ksp,
+@@ -2076,6 +2181,8 @@ zone_zsd_init(void)
+ 	zone0.zone_locked_mem_ctl = UINT64_MAX;
+ 	ASSERT(zone0.zone_max_swap == 0);
+ 	zone0.zone_max_swap_ctl = UINT64_MAX;
++	zone0.zone_phys_mem = 0;
++	zone0.zone_phys_mem_ctl = UINT64_MAX;
+ 	zone0.zone_max_lofi = 0;
+ 	zone0.zone_max_lofi_ctl = UINT64_MAX;
+ 	zone0.zone_shmmax = 0;
+@@ -2099,6 +2206,7 @@ zone_zsd_init(void)
+ 	zone0.zone_initname = initname;
+ 	zone0.zone_lockedmem_kstat = NULL;
+ 	zone0.zone_swapresv_kstat = NULL;
++	zone0.zone_physmem_kstat = NULL;
+ 	zone0.zone_nprocs_kstat = NULL;
+ 	zone0.zone_zfs_io_pri = 1;
+ 
+@@ -2268,6 +2376,11 @@ zone_init(void)
+ 	    RCTL_GLOBAL_DENY_ALWAYS, UINT64_MAX, UINT64_MAX,
+ 	    &zone_max_swap_ops);
+ 
++	rc_zone_phys_mem = rctl_register("zone.max-physical-memory",
++	    RCENTITY_ZONE, RCTL_GLOBAL_NOBASIC | RCTL_GLOBAL_BYTES |
++	    RCTL_GLOBAL_DENY_ALWAYS, UINT64_MAX, UINT64_MAX,
++	    &zone_phys_mem_ops);
++
+ 	rc_zone_max_lofi = rctl_register("zone.max-lofi",
+ 	    RCENTITY_ZONE, RCTL_GLOBAL_NOBASIC | RCTL_GLOBAL_COUNT |
+ 	    RCTL_GLOBAL_DENY_ALWAYS, UINT64_MAX, UINT64_MAX,
+@@ -2579,14 +2692,31 @@ zone_set_initname(zone_t *zone, const char *zone_initname)
+ 	return (0);
+ }
+ 
++/*
++ * The zone_set_mcap_nover and zone_set_mcap_pageout functions are used
++ * to provide the physical memory capping kstats.  Since physical memory
++ * capping is currently implemented in userland, that code uses the setattr
++ * entry point to increment the kstats.  We always simply increment nover
++ * every time that setattr is called and we always add in the input value
++ * to zone_mcap_pagedout every time that is called.
++ */
++/*ARGSUSED*/
+ static int
+-zone_set_phys_mcap(zone_t *zone, const uint64_t *zone_mcap)
++zone_set_mcap_nover(zone_t *zone, const uint64_t *zone_nover)
+ {
+-	uint64_t mcap;
+-	int err = 0;
++	zone->zone_mcap_nover++;
+ 
+-	if ((err = copyin(zone_mcap, &mcap, sizeof (uint64_t))) == 0)
+-		zone->zone_phys_mcap = mcap;
++	return (0);
++}
++
++static int
++zone_set_mcap_pageout(zone_t *zone, const uint64_t *zone_pageout)
++{
++	uint64_t pageout;
++	int err;
++
++	if ((err = copyin(zone_pageout, &pageout, sizeof (uint64_t))) == 0)
++		zone->zone_mcap_pagedout += pageout;
+ 
+ 	return (err);
+ }
+@@ -4465,10 +4595,13 @@ zone_create(const char *zone_name, const char *zone_root,
+ 	zone->zone_locked_mem_ctl = UINT64_MAX;
+ 	zone->zone_max_swap = 0;
+ 	zone->zone_max_swap_ctl = UINT64_MAX;
++	zone->zone_phys_mem = 0;
++	zone->zone_phys_mem_ctl = UINT64_MAX;
+ 	zone->zone_max_lofi = 0;
+ 	zone->zone_max_lofi_ctl = UINT64_MAX;
+ 	zone->zone_lockedmem_kstat = NULL;
+ 	zone->zone_swapresv_kstat = NULL;
++	zone->zone_physmem_kstat = NULL;
+ 	zone->zone_zfs_io_pri = 1;
+ 
+ 	/*
+@@ -5525,14 +5658,6 @@ zone_getattr(zoneid_t zoneid, int attr, void *buf, size_t bufsize)
+ 				error = EFAULT;
+ 		}
+ 		break;
+-	case ZONE_ATTR_PHYS_MCAP:
+-		size = sizeof (zone->zone_phys_mcap);
+-		if (bufsize > size)
+-			bufsize = size;
+-		if (buf != NULL &&
+-		    copyout(&zone->zone_phys_mcap, buf, bufsize) != 0)
+-			error = EFAULT;
+-		break;
+ 	case ZONE_ATTR_SCHED_CLASS:
+ 		mutex_enter(&class_lock);
+ 
+@@ -5618,10 +5743,11 @@ zone_setattr(zoneid_t zoneid, int attr, void *buf, size_t bufsize)
+ 		return (set_errno(EPERM));
+ 
+ 	/*
+-	 * Only the ZONE_ATTR_PHYS_MCAP attribute can be set on the
+-	 * global zone.
++	 * Only the ZONE_ATTR_PMCAP_NOVER and ZONE_ATTR_PMCAP_PAGEOUT
++	 * attributes can be set on the global zone.
+ 	 */
+-	if (zoneid == GLOBAL_ZONEID && attr != ZONE_ATTR_PHYS_MCAP) {
++	if (zoneid == GLOBAL_ZONEID &&
++	    attr != ZONE_ATTR_PMCAP_NOVER && attr != ZONE_ATTR_PMCAP_PAGEOUT) {
+ 		return (set_errno(EINVAL));
+ 	}
+ 
+@@ -5638,7 +5764,8 @@ zone_setattr(zoneid_t zoneid, int attr, void *buf, size_t bufsize)
+ 	 * non-global zones.
+ 	 */
+ 	zone_status = zone_status_get(zone);
+-	if (attr != ZONE_ATTR_PHYS_MCAP && zone_status > ZONE_IS_READY) {
++	if (attr != ZONE_ATTR_PMCAP_NOVER && attr != ZONE_ATTR_PMCAP_PAGEOUT &&
++	    zone_status > ZONE_IS_READY) {
+ 		err = EINVAL;
+ 		goto done;
+ 	}
+@@ -5660,8 +5787,11 @@ zone_setattr(zoneid_t zoneid, int attr, void *buf, size_t bufsize)
+ 	case ZONE_ATTR_FS_ALLOWED:
+ 		err = zone_set_fs_allowed(zone, (const char *)buf);
+ 		break;
+-	case ZONE_ATTR_PHYS_MCAP:
+-		err = zone_set_phys_mcap(zone, (const uint64_t *)buf);
++	case ZONE_ATTR_PMCAP_NOVER:
++		err = zone_set_mcap_nover(zone, (const uint64_t *)buf);
++		break;
++	case ZONE_ATTR_PMCAP_PAGEOUT:
++		err = zone_set_mcap_pageout(zone, (const uint64_t *)buf);
+ 		break;
+ 	case ZONE_ATTR_SCHED_CLASS:
+ 		err = zone_set_sched_class(zone, (const char *)buf);
+diff --git a/usr/src/uts/common/sys/zone.h b/usr/src/uts/common/sys/zone.h
+index 67b8a25..475bf03 100644
+--- a/usr/src/uts/common/sys/zone.h
++++ b/usr/src/uts/common/sys/zone.h
+@@ -97,12 +97,14 @@ extern "C" {
+ #define	ZONE_ATTR_INITNAME	9
+ #define	ZONE_ATTR_BOOTARGS	10
+ #define	ZONE_ATTR_BRAND		11
+-#define	ZONE_ATTR_PHYS_MCAP	12
++#define	ZONE_ATTR_PMCAP_NOVER	12
+ #define	ZONE_ATTR_SCHED_CLASS	13
+ #define	ZONE_ATTR_FLAGS		14
+ #define	ZONE_ATTR_HOSTID	15
+ #define	ZONE_ATTR_FS_ALLOWED	16
+ #define	ZONE_ATTR_NETWORK	17
++#define	ZONE_ATTR_DID		18
++#define	ZONE_ATTR_PMCAP_PAGEOUT	19
+ #define	ZONE_ATTR_INITNORESTART	20
+ 
+ /* Start of the brand-specific attribute namespace */
+@@ -414,6 +416,13 @@ typedef struct {
+ 	kstat_named_t	zm_boot_time;
+ } zone_misc_kstat_t;
+ 
++typedef struct {
++	kstat_named_t	zm_rss;
++	kstat_named_t	zm_swap;
++	kstat_named_t	zm_nover;
++	kstat_named_t	zm_pagedout;
++} zone_mcap_kstat_t;
++
+ typedef struct zone {
+ 	/*
+ 	 * zone_name is never modified once set.
+@@ -508,7 +517,7 @@ typedef struct zone {
+ 	char		*zone_initname;	/* fs path to 'init' */
+ 	int		zone_boot_err;  /* for zone_boot() if boot fails */
+ 	char		*zone_bootargs;	/* arguments passed via zone_boot() */
+-	uint64_t	zone_phys_mcap;	/* physical memory cap */
++	rctl_qty_t	zone_phys_mem_ctl;	/* current phys. memory limit */
+ 	/*
+ 	 * zone_kthreads is protected by zone_status_lock.
+ 	 */
+@@ -590,6 +599,13 @@ typedef struct zone {
+ 						/* zone_rctls->rcs_lock */
+ 	kstat_t		*zone_nprocs_kstat;
+ 
++	/*
++	 * kstats and counters for physical memory capping.
++	 */
++	rctl_qty_t	zone_phys_mem;	/* current bytes of phys. mem. (RSS) */
++	kstat_t		*zone_physmem_kstat;
++	uint64_t	zone_mcap_nover;	/* # of times over phys. cap */
++	uint64_t	zone_mcap_pagedout;	/* bytes of mem. paged out */
+ 	kmutex_t	zone_mcap_lock;	/* protects mcap statistics */
+ 	kstat_t		*zone_mcap_ksp;
+ 	zone_mcap_kstat_t *zone_mcap_stats;
+@@ -873,6 +889,7 @@ extern int zone_walk(int (*)(zone_t *, void *), void *);
+ 
+ extern rctl_hndl_t rc_zone_locked_mem;
+ extern rctl_hndl_t rc_zone_max_swap;
++extern rctl_hndl_t rc_zone_phys_mem;
+ extern rctl_hndl_t rc_zone_max_lofi;
+ 
+ #endif	/* _KERNEL */
+diff --git a/usr/src/uts/common/syscall/sysconfig.c b/usr/src/uts/common/syscall/sysconfig.c
+index 03f2fab..b9249fa 100644
+--- a/usr/src/uts/common/syscall/sysconfig.c
++++ b/usr/src/uts/common/syscall/sysconfig.c
+@@ -22,6 +22,7 @@
+ /*
+  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
++ * Copyright 2011 Joyent, Inc.  All rights reserved.
+  */
+ 
+ /*	Copyright (c) 1984, 1986, 1987, 1988, 1989 AT&T	*/
+@@ -170,8 +171,8 @@ sysconfig(int which)
+ 		 * even though rcapd can be used on the global zone too.
+ 		 */
+ 		if (!INGLOBALZONE(curproc) &&
+-		    curproc->p_zone->zone_phys_mcap != 0)
+-			return (MIN(btop(curproc->p_zone->zone_phys_mcap),
++		    curproc->p_zone->zone_phys_mem_ctl != UINT64_MAX)
++			return (MIN(btop(curproc->p_zone->zone_phys_mem_ctl),
+ 			    physinstalled));
+ 
+ 		return (physinstalled);
+@@ -184,12 +185,12 @@ sysconfig(int which)
+ 		 * though rcapd can be used on the global zone too.
+ 		 */
+ 		if (!INGLOBALZONE(curproc) &&
+-		    curproc->p_zone->zone_phys_mcap != 0) {
++		    curproc->p_zone->zone_phys_mem_ctl != UINT64_MAX) {
+ 			pgcnt_t cap, rss, free;
+ 			vmusage_t in_use;
+ 			size_t cnt = 1;
+ 
+-			cap = btop(curproc->p_zone->zone_phys_mcap);
++			cap = btop(curproc->p_zone->zone_phys_mem_ctl);
+ 			if (cap > physinstalled)
+ 				return (freemem);
+ 
+diff --git a/usr/src/uts/common/vm/vm_usage.c b/usr/src/uts/common/vm/vm_usage.c
+index 57166b4..16bb476 100644
+--- a/usr/src/uts/common/vm/vm_usage.c
++++ b/usr/src/uts/common/vm/vm_usage.c
+@@ -22,6 +22,7 @@
+ /*
+  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+  * Use is subject to license terms.
++ * Copyright 2011 Joyent, Inc.  All rights reserved.
+  */
+ 
+ /*
+@@ -1739,6 +1740,28 @@ vmu_cache_rele(vmu_cache_t *cache)
+ }
+ 
+ /*
++ * When new data is calculated, update the phys_mem rctl usage value in the
++ * zones.
++ */
++static void
++vmu_update_zone_rctls(vmu_cache_t *cache)
++{
++	vmusage_t	*rp;
++	size_t		i = 0;
++	zone_t		*zp;
++
++	for (rp = cache->vmc_results; i < cache->vmc_nresults; rp++, i++) {
++		if (rp->vmu_type == VMUSAGE_ZONE &&
++		    rp->vmu_zoneid != ALL_ZONES) {
++			if ((zp = zone_find_by_id(rp->vmu_zoneid)) != NULL) {
++			        zp->zone_phys_mem = rp->vmu_rss_all;
++			        zone_rele(zp);
++			}
++		}
++	}
++}
++
++/*
+  * Copy out the cached results to a caller.  Inspect the callers flags
+  * and zone to determine which cached results should be copied.
+  */
+@@ -2009,6 +2032,8 @@ start:
+ 
+ 		mutex_exit(&vmu_data.vmu_lock);
+ 
++		/* update zone's phys. mem. rctl usage */
++		vmu_update_zone_rctls(cache);
+ 		/* copy cache */
+ 		ret = vmu_copyout_results(cache, buf, nres, flags_orig, cpflg);
+ 		mutex_enter(&vmu_data.vmu_lock);
+-- 
+2.8.0
+
