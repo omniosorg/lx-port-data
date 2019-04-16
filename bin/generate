@@ -1,0 +1,53 @@
+#!/bin/ksh -p
+
+illumos="$1"
+
+if [ -z "$illumos" -o ! -d "$illumos/.git" ]; then
+	echo "Syntax: $0 <path to illumos checkout>"
+	exit 1
+fi
+
+function newdir {
+	echo
+	echo "# $*"
+}
+
+function newmonth {
+	cat << EOM
+### $*
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+EOM
+}
+
+function newhash {
+	hash=$1
+	subj=`git -C $illumos show -s --pretty=%s $hash | \
+	    sed -E 's/ *(Reviewed).*//'`
+	date=`git -C $illumos show -s --pretty=%ad $hash |
+	    nawk '{printf("%s%s%s\n", $3, $2, $5)}'`
+	ticket=`echo $subj | awk '{print $1}'`
+	echo "| $date" \
+	     "| [$subj](https://smartos.org/bugview/$ticket)" \
+	     "| [$hash](https://github.com/joyent/illumos-joyent/commit/$hash)"
+}
+
+#newdir Initial Port
+#newmonth "initial"
+#cat r151019/old-tries/try2-success/ij-picked-commits | while read hash; do
+#	newhash $hash
+#done
+
+for dir in r151019 20*; do
+	[ -d "$dir" ] || continue
+	newdir $dir
+	ls -1 $dir/ | sort -M | while read m; do
+		[ -s $dir/$m/ij-picked-commits ] || continue
+		newmonth "$dir / $m"
+		cat $dir/$m/ij-picked-commits | while read hash; do
+			newhash $hash
+		done
+	done
+done
+
