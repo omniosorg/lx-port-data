@@ -1728,3 +1728,199 @@
 | Date | Subject | Commit |
 | ---- | ------- | ------ |
 | 17Mar2019 | [OS-7672 recursive mutex enter in ahci](https://smartos.org/bugview/OS-7672) | [554f80e97289e58da5f8cd5d6334edd78d1f0461](https://github.com/joyent/illumos-joyent/commit/554f80e97289e58da5f8cd5d6334edd78d1f0461)
+### 2019 / Apr23
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 30Mar2019 | [OS-7409 bhyve does not receive multicast packets](https://smartos.org/bugview/OS-7409) | [9a8207fa35a4a0b13b30000d6ead058c47c0ccc3](https://github.com/joyent/illumos-joyent/commit/9a8207fa35a4a0b13b30000d6ead058c47c0ccc3)
+| 4Apr2019 | [OS-7696 bhyve should avoid all-cpu cross calls](https://smartos.org/bugview/OS-7696) | [919d37f67476ae6f9911035197d34891582d50e6](https://github.com/joyent/illumos-joyent/commit/919d37f67476ae6f9911035197d34891582d50e6)
+| 10Apr2019 | [OS-7727 want mac rx barrier function](https://smartos.org/bugview/OS-7727) | [39324c3c3e700905593cf884cb6987cf0db01381](https://github.com/joyent/illumos-joyent/commit/39324c3c3e700905593cf884cb6987cf0db01381)
+| 6Apr2019 | [OS-7710 Need support for new Cascade Lake Instructions](https://smartos.org/bugview/OS-7710) | [415cf8a5eb8e0e24078e9823addd997910540da3](https://github.com/joyent/illumos-joyent/commit/415cf8a5eb8e0e24078e9823addd997910540da3)
+| 8Apr2019 | [OS-7715 Update PCIe capability headers for PCIe 4.x OS-7716 Record PCIe gen 4 caps](https://smartos.org/bugview/OS-7715) | [73131413e33d27e27d3f8b79bfcfe92cbbbd1b2f](https://github.com/joyent/illumos-joyent/commit/73131413e33d27e27d3f8b79bfcfe92cbbbd1b2f)
+### 2019 / May09
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 30Mar2019 | [OS-7409 bhyve does not receive multicast packets](https://smartos.org/bugview/OS-7409) | [9a8207fa35a4a0b13b30000d6ead058c47c0ccc3](https://github.com/joyent/illumos-joyent/commit/9a8207fa35a4a0b13b30000d6ead058c47c0ccc3)
+| 4Apr2019 | [OS-7696 bhyve should avoid all-cpu cross calls](https://smartos.org/bugview/OS-7696) | [919d37f67476ae6f9911035197d34891582d50e6](https://github.com/joyent/illumos-joyent/commit/919d37f67476ae6f9911035197d34891582d50e6)
+| 10Apr2019 | [OS-7727 want mac rx barrier function](https://smartos.org/bugview/OS-7727) | [39324c3c3e700905593cf884cb6987cf0db01381](https://github.com/joyent/illumos-joyent/commit/39324c3c3e700905593cf884cb6987cf0db01381)
+| 9Apr2019 | [OS-7755 add sendmmsg() and recvmmsg() to lx](https://smartos.org/bugview/OS-7755) | [7847a0def2f92ff8670c7d008f9caae2b2585752](https://github.com/joyent/illumos-joyent/commit/7847a0def2f92ff8670c7d008f9caae2b2585752)
+### 2019 / May16
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 1May2019 | [OS-7793 Need mitigation for MDS](https://smartos.org/bugview/OS-7793) | [a129b6ac948a795e06506944867eb18a238526d1](https://github.com/joyent/illumos-joyent/commit/a129b6ac948a795e06506944867eb18a238526d1)
+| 15May2019 | [OS-7768 illumos-joyent needs smatch fixes](https://smartos.org/bugview/OS-7768) | [6853053741569b9547e774ed1593c3a260801c7f](https://github.com/joyent/illumos-joyent/commit/6853053741569b9547e774ed1593c3a260801c7f)
+| 14May2019 | [OS-7662 need a way to disable SMT](https://smartos.org/bugview/OS-7662) | [d980e527387fd27a9f615306897c215e07c5df8b](https://github.com/joyent/illumos-joyent/commit/d980e527387fd27a9f615306897c215e07c5df8b)
+### 2019 / May23
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 16May2019 | [OS-7801 bhyve should expose MD_CLEAR capability](https://smartos.org/bugview/OS-7801) | [8bab6c89a8b6b113b13e1cca5a6dc469de70ef77](https://github.com/joyent/illumos-joyent/commit/8bab6c89a8b6b113b13e1cca5a6dc469de70ef77)
+| 24Apr2019 | [OS-7753 THREAD_KPRI_RELEASE does nothing of the sort](https://smartos.org/bugview/OS-7753) | [aa451f1e540c93bda3973fc20bad14188a136989](https://github.com/joyent/illumos-joyent/commit/aa451f1e540c93bda3973fc20bad14188a136989)
+### 2019 / Jun05
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 21May2019 | [OS-7804 viona VTNET_MAXSEGS is inadequate](https://smartos.org/bugview/OS-7804) | [02cb34eaba53e25b88f4c45c169457be7583b1f5](https://github.com/joyent/illumos-joyent/commit/02cb34eaba53e25b88f4c45c169457be7583b1f5)
+| 29May2019 | [OS-7812 viona bungles refcount during ipf hook](https://smartos.org/bugview/OS-7812) | [6f71139576710f2540b5971696788f73fa207775](https://github.com/joyent/illumos-joyent/commit/6f71139576710f2540b5971696788f73fa207775)
+### 2019 / Jun12
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 8May2019 | [OS-7777 simplify bhyve vlapic ESR logic](https://smartos.org/bugview/OS-7777) | [aa2898c4ff7db0df94db22a2ce5d7958a806e4d8](https://github.com/joyent/illumos-joyent/commit/aa2898c4ff7db0df94db22a2ce5d7958a806e4d8)
+### 2019 / Jun18
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 12Jun2019 | [OS-7835 bhyve modules should have mapfiles](https://smartos.org/bugview/OS-7835) | [de37b27aa9332f8b33b7b4041b3bdaa6894dcde9](https://github.com/joyent/illumos-joyent/commit/de37b27aa9332f8b33b7b4041b3bdaa6894dcde9)
+| 4Jun2019 | [OS-7819 bhyve upstream sync 2019 June](https://smartos.org/bugview/OS-7819) | [c3cbf49c8d881ba57710e7e8b70aa6275bc5fc44](https://github.com/joyent/illumos-joyent/commit/c3cbf49c8d881ba57710e7e8b70aa6275bc5fc44)
+### 2019 / Jun30
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 28Feb2019 | [OS-7622 bhyve vioapic writes can deadlock instance](https://smartos.org/bugview/OS-7622) | [ec6f18e946abf1cebedfd0d7ca47dd5a5d183ff8](https://github.com/joyent/illumos-joyent/commit/ec6f18e946abf1cebedfd0d7ca47dd5a5d183ff8)
+| 8Jun2019 | [OS-7850 AMD F17 core topology is per process node](https://smartos.org/bugview/OS-7850) | [394dadbc86535e5075b260851683ccbb3f571c6d](https://github.com/joyent/illumos-joyent/commit/394dadbc86535e5075b260851683ccbb3f571c6d)
+| 26Jun2019 | [OS-7861 lxbrand futexes should limit CAS retries](https://smartos.org/bugview/OS-7861) | [9f27b084492b24583dbcc44e59ce9eaacd78ed68](https://github.com/joyent/illumos-joyent/commit/9f27b084492b24583dbcc44e59ce9eaacd78ed68)
+### 2019 / Jul20
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 12Dec2018 | [OS-7447 formalize bhyve resource exclusion](https://smartos.org/bugview/OS-7447) | [b69647d3aacd223817db151e369b34ec2471cf28](https://github.com/joyent/illumos-joyent/commit/b69647d3aacd223817db151e369b34ec2471cf28)
+| 15Jul2019 | [OS-6684 cyclic reprogramming can race with removal](https://smartos.org/bugview/OS-6684) | [7cbfae1c5ff60dcbb4e007dcc2e6997eba63c207](https://github.com/joyent/illumos-joyent/commit/7cbfae1c5ff60dcbb4e007dcc2e6997eba63c207)
+| 6Jun2019 | [OS-7843 viona could be split up](https://smartos.org/bugview/OS-7843) | [9e88ade90f654d7c2cdfcec90cface22eaa124c7](https://github.com/joyent/illumos-joyent/commit/9e88ade90f654d7c2cdfcec90cface22eaa124c7)
+### 2019 / Aug12
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 23Jul2019 | [OS-7790 enable smatch build for illumos-joyent](https://smartos.org/bugview/OS-7790) | [c697085b76d32ea7025959f61179747ba7a9f921](https://github.com/joyent/illumos-joyent/commit/c697085b76d32ea7025959f61179747ba7a9f921)
+| 23Jul2019 | [OS-7790 enable smatch build for illumos-joyent (fix gcc7 build)](https://smartos.org/bugview/OS-7790) | [2da796e74860394b745e12d55473509fafec2c04](https://github.com/joyent/illumos-joyent/commit/2da796e74860394b745e12d55473509fafec2c04)
+| 23Jul2019 | [OS-7899 LX handing of SO_REUSEADDR needs to be closer to Linux](https://smartos.org/bugview/OS-7899) | [ec6335ff2d187135730376f34f2fe1cae4189572](https://github.com/joyent/illumos-joyent/commit/ec6335ff2d187135730376f34f2fe1cae4189572)
+| 20Dec2018 | [OS-7902 Document mdb(1) ::ps flags](https://smartos.org/bugview/OS-7902) | [258d6b4c4d7a365e9fa0e220778c556aeb8dc45d](https://github.com/joyent/illumos-joyent/commit/258d6b4c4d7a365e9fa0e220778c556aeb8dc45d)
+| 20Jan2019 | [OS-7903 Document mdb(1) ::dis flags](https://smartos.org/bugview/OS-7903) | [6ae988a66abd6e53f1d2a0029e7022e49aeb23ea](https://github.com/joyent/illumos-joyent/commit/6ae988a66abd6e53f1d2a0029e7022e49aeb23ea)
+| 7Aug2019 | [OS-7925 rw_exit lockstat patch point has garbage %rcx](https://smartos.org/bugview/OS-7925) | [0635f4740516048df6810fe138aadac82b5781ad](https://github.com/joyent/illumos-joyent/commit/0635f4740516048df6810fe138aadac82b5781ad)
+| 24Jul2019 | [OS-7904 simnet has bogus mi_tx_cksum_flags OS-7905 mac_tx() is too eager to emulate hardware offloads](https://smartos.org/bugview/OS-7904) | [d9a5c916025d7e371ecdf44ba0357404ffa47f24](https://github.com/joyent/illumos-joyent/commit/d9a5c916025d7e371ecdf44ba0357404ffa47f24)
+### 2019 / Aug23
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 12Aug2019 | [OS-7947 OS-7899 causes failure mode with SO_REUSEADDR and SOCK_DGRAM](https://smartos.org/bugview/OS-7947) | [67641ea6388b5f3e3e6a72aadf956313c58ca521](https://github.com/joyent/illumos-joyent/commit/67641ea6388b5f3e3e6a72aadf956313c58ca521)
+| 8Feb2019 | [OS-7620 Use -fstack-protector-strong when available](https://smartos.org/bugview/OS-7620) | [edccf53a08a5dc2a1536d248367ab3aaf477ae60](https://github.com/joyent/illumos-joyent/commit/edccf53a08a5dc2a1536d248367ab3aaf477ae60)
+| 7Dec2018 | [OS-7598 Kernel needs to be built with retpolines OS-7621 Kernel needs to generally use RSB stuffing](https://smartos.org/bugview/OS-7598) | [fae35450c961f8c5a41382adf0e202906b2c4584](https://github.com/joyent/illumos-joyent/commit/fae35450c961f8c5a41382adf0e202906b2c4584)
+| 6Aug2019 | [OS-7924 OS-7520 regressed some instances of IP forwarding](https://smartos.org/bugview/OS-7924) | [0678e39e27ea5dfce7fc85dcc38c837f3c8f6f6d](https://github.com/joyent/illumos-joyent/commit/0678e39e27ea5dfce7fc85dcc38c837f3c8f6f6d)
+| 22Aug2019 | [10703 smatch unreachable code checking needs reworking (fix Joyent code)](https://smartos.org/bugview/10703) | [4ad9cc07d7a3af5dbe729bd2da31e2919a64a691](https://github.com/joyent/illumos-joyent/commit/4ad9cc07d7a3af5dbe729bd2da31e2919a64a691)
+### 2019 / Aug29
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 5Dec2018 | [OS-7427 Support Linux congestion control interfaces in LX zones](https://smartos.org/bugview/OS-7427) | [df3850281ea4def494e12172cae5a6181823c77d](https://github.com/joyent/illumos-joyent/commit/df3850281ea4def494e12172cae5a6181823c77d)
+| 27Aug2019 | [OS-7960 need fixes for NULL as a pointer](https://smartos.org/bugview/OS-7960) | [fa1252de73f343f36bf1e6f366902ba96c480aaa](https://github.com/joyent/illumos-joyent/commit/fa1252de73f343f36bf1e6f366902ba96c480aaa)
+### 2019 / Sep13
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 3Sep2019 | [OS-7978 ps in some lx zones no longer works](https://smartos.org/bugview/OS-7978) | [391bfda4cfa65547cb06c514c00f3b9b70864abc](https://github.com/joyent/illumos-joyent/commit/391bfda4cfa65547cb06c514c00f3b9b70864abc)
+| 12Aug2019 | [OS-7951 CUBIC module should react immediately to CC_RTO congestion signal](https://smartos.org/bugview/OS-7951) | [1ed9823d08fd2b08c4d4f0d9a57075899d36b295](https://github.com/joyent/illumos-joyent/commit/1ed9823d08fd2b08c4d4f0d9a57075899d36b295)
+| 9Sep2019 | [OS-7882 nvmeadm attach/detach of ignored namespace causes panic](https://smartos.org/bugview/OS-7882) | [b0dbab4410d7472fc05021b3e954c506b64b4190](https://github.com/joyent/illumos-joyent/commit/b0dbab4410d7472fc05021b3e954c506b64b4190)
+| 10Sep2019 | [OS-6805 packet flow over a defaulted LACP port](https://smartos.org/bugview/OS-6805) | [f575b548814883ebc2eb65fe406ec62d0d6b5bbb](https://github.com/joyent/illumos-joyent/commit/f575b548814883ebc2eb65fe406ec62d0d6b5bbb)
+| 12Sep2019 | [OS-7931 ::refstr would be useful OS-7932 ::ps -s could show service FMRIs OS-7934 ptree could show service FMRIs OS-3513 ptools should see more process arguments](https://smartos.org/bugview/OS-7931) | [c6dd2307128aa25ac346f7818440cd5cfd1f7221](https://github.com/joyent/illumos-joyent/commit/c6dd2307128aa25ac346f7818440cd5cfd1f7221)
+### 2019 / Sep18
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 5Sep2019 | [OS-7980 lx getsockopt should return EOPNOTSUPP when TCP options are used with AF_UNIX](https://smartos.org/bugview/OS-7980) | [8f77bed5b9e3f96e1fcf344bef8e85a338e9da6b](https://github.com/joyent/illumos-joyent/commit/8f77bed5b9e3f96e1fcf344bef8e85a338e9da6b)
+### 2019 / Oct02
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 24Sep2019 | [OS-7992 use native linker sets for bhyve build](https://smartos.org/bugview/OS-7992) | [3105c6ff4e5cab926dc4802a7e10eee1f4abbec4](https://github.com/joyent/illumos-joyent/commit/3105c6ff4e5cab926dc4802a7e10eee1f4abbec4)
+| 27Sep2019 | [OS-8000 viona ring reset can race with Rx packets](https://smartos.org/bugview/OS-8000) | [e4b201171637339e9c582457e461fb99e6a4cc56](https://github.com/joyent/illumos-joyent/commit/e4b201171637339e9c582457e461fb99e6a4cc56)
+### 2019 / Nov07
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 23Oct2019 | [OS-8008 bhyve on AMD should report SVM as disabled](https://smartos.org/bugview/OS-8008) | [c76cd14c4b928c713e29e8db8ad0889f08810f5d](https://github.com/joyent/illumos-joyent/commit/c76cd14c4b928c713e29e8db8ad0889f08810f5d)
+### 2019 / Nov18
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 12Nov2019 | [OS-8042 viona_open() gets id_alloc_nosleep() wrong (#230)](https://smartos.org/bugview/OS-8042) | [a335340d89660e52bf853ff4711ebeb1f0310643](https://github.com/joyent/illumos-joyent/commit/a335340d89660e52bf853ff4711ebeb1f0310643)
+| 14Nov2019 | [OS-8027 reinstate mac-loopback hardware emulation on Tx (undo OS-6778)](https://smartos.org/bugview/OS-8027) | [dff0473c792fc5c3ef7c3d862e557fe201a5d671](https://github.com/joyent/illumos-joyent/commit/dff0473c792fc5c3ef7c3d862e557fe201a5d671)
+| 14Nov2019 | [OS-8027 reinstate mac-loopback hardware emulation on Tx [fix debug] (#234)](https://smartos.org/bugview/OS-8027) | [5cb315633c04958c08cfb359a7fa032ce09bdbd1](https://github.com/joyent/illumos-joyent/commit/5cb315633c04958c08cfb359a7fa032ce09bdbd1)
+### 2019 / Nov28
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 28Nov2019 | [OS-8056 lx brk should never start at zero (#233)](https://smartos.org/bugview/OS-8056) | [09f69895a11ea4b8eb83c65cc9de22502d7d41a8](https://github.com/joyent/illumos-joyent/commit/09f69895a11ea4b8eb83c65cc9de22502d7d41a8)
+
+# 2020
+### 2020 / Jan03
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 13Dec2019 | [OS-8064 test-fw "enable / disable - enable zone fw" has "ipf -E" failing with SIOCFRENB error (#242)](https://smartos.org/bugview/OS-8064) | [ef0c70910b8d8d5e35f7ce69df9280f494169834](https://github.com/joyent/illumos-joyent/commit/ef0c70910b8d8d5e35f7ce69df9280f494169834)
+| 2Jan2020 | [OS-8083 zlogin -I now hangs at zone stop (#247)](https://smartos.org/bugview/OS-8083) | [fc356053b6fcdfb2eb1f9353e1b7e5332fbfcaf8](https://github.com/joyent/illumos-joyent/commit/fc356053b6fcdfb2eb1f9353e1b7e5332fbfcaf8)
+### 2020 / Jan10
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 10Jan2020 | [OS-8089 lx_isdir() leaks a cred_t (#253)](https://smartos.org/bugview/OS-8089) | [8b175886ef45935e972cf1df20218f2de66d49b1](https://github.com/joyent/illumos-joyent/commit/8b175886ef45935e972cf1df20218f2de66d49b1)
+### 2020 / Mar13
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 24Feb2020 | [OS-8120 fix ldd guidance for GCC4 build](https://smartos.org/bugview/OS-8120) | [1f12ad8d4c92be414790542c59057b38da62884c](https://github.com/joyent/illumos-joyent/commit/1f12ad8d4c92be414790542c59057b38da62884c)
+| 11Mar2020 | [OS-8117 bhyve upstream sync 2019 Sept (#263)](https://smartos.org/bugview/OS-8117) | [4327ac76d19a07f330bc609add63aaa6bb51db89](https://github.com/joyent/illumos-joyent/commit/4327ac76d19a07f330bc609add63aaa6bb51db89)
+### 2020 / Mar23
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 18Mar2020 | [OS-8136 Add DISCARD/TRIM support to bhyve (#268)](https://smartos.org/bugview/OS-8136) | [bfe191c490dc33e77e134e9bb5e2c8a3da737a29](https://github.com/joyent/illumos-joyent/commit/bfe191c490dc33e77e134e9bb5e2c8a3da737a29)
+| 23Mar2020 | [OS-8136 Add DISCARD/TRIM support to bhyve (illumos specific bits) (#270)](https://smartos.org/bugview/OS-8136) | [da036f5cbc2608d7100a682f9c91a938e76cefdc](https://github.com/joyent/illumos-joyent/commit/da036f5cbc2608d7100a682f9c91a938e76cefdc)
+### 2020 / Mar26
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 24Mar2020 | [OS-8143 Keep the shadow PCIR_COMMAND synced with the real one for pass through.](https://smartos.org/bugview/OS-8143) | [83d6c1c819dce16c1f12a8ae9f0d8319900f4695](https://github.com/joyent/illumos-joyent/commit/83d6c1c819dce16c1f12a8ae9f0d8319900f4695)
+| 25Mar2020 | [OS-8145 Add MemAvailable to lx procfs (#267)](https://smartos.org/bugview/OS-8145) | [94eb3b821b728e8dc462bb87d35b5f55b5835edc](https://github.com/joyent/illumos-joyent/commit/94eb3b821b728e8dc462bb87d35b5f55b5835edc)
+### 2020 / Apr10
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 31Mar2020 | [OS-8150 lx should not report unlimited for max open files (#279)](https://smartos.org/bugview/OS-8150) | [88606cbe3645730adccc57e29f4b829af51c05f4](https://github.com/joyent/illumos-joyent/commit/88606cbe3645730adccc57e29f4b829af51c05f4)
+| 7Apr2020 | [OS-8152 lx should return EACCES when SOCK_DGRAM is used with IPPROTO_ICMP](https://smartos.org/bugview/OS-8152) | [cb1f21263e5283c3502e718042f50eeef6ced5bb](https://github.com/joyent/illumos-joyent/commit/cb1f21263e5283c3502e718042f50eeef6ced5bb)
+| 7Apr2020 | [OS-8156 lx void linux image support (#284)](https://smartos.org/bugview/OS-8156) | [4fc8237742a380d4833394892fb148e1a34acb28](https://github.com/joyent/illumos-joyent/commit/4fc8237742a380d4833394892fb148e1a34acb28)
+### 2020 / May01
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 29Apr2020 | [OS-8166 /etc/zones/did.txt should be alternate-root aware (#295)](https://smartos.org/bugview/OS-8166) | [07f59955ed70f8875b7d89dd494defd7f0b1337d](https://github.com/joyent/illumos-joyent/commit/07f59955ed70f8875b7d89dd494defd7f0b1337d)
+| 30Apr2020 | [OS-8165 dockerinit should be able to start lx_lockd (#297)](https://smartos.org/bugview/OS-8165) | [54a7e5761a35624975c2f384a98b3235bf625094](https://github.com/joyent/illumos-joyent/commit/54a7e5761a35624975c2f384a98b3235bf625094)
+### 2020 / May05
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 4May2020 | [OS-8167 lx_upcall_statd() may hang-or-panic when trying to upcall (#299)](https://smartos.org/bugview/OS-8167) | [a59b194a7b40a08dc3d3ffe01f7781acd43ae60f](https://github.com/joyent/illumos-joyent/commit/a59b194a7b40a08dc3d3ffe01f7781acd43ae60f)
+### 2020 / May13
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 11May2020 | [OS-8076 Panic in vlapic_callout_handler (#296)](https://smartos.org/bugview/OS-8076) | [8c6284f26f84d01dcbb0f93a15e9cf0da38c36de](https://github.com/joyent/illumos-joyent/commit/8c6284f26f84d01dcbb0f93a15e9cf0da38c36de)
+### 2020 / Jun04
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 29May2020 | [OS-8181 lx getsockopt of SO_PROTOCOL fails (#306)](https://smartos.org/bugview/OS-8181) | [b46b025a675e74978d102d023bc022568429d1bb](https://github.com/joyent/illumos-joyent/commit/b46b025a675e74978d102d023bc022568429d1bb)
+| 3Jun2020 | [OS-8054 inotify watches lead to EBUSY during zfs mount (#305)](https://smartos.org/bugview/OS-8054) | [71b43f2a12f58ef8bc5a1965a3b742749bb49231](https://github.com/joyent/illumos-joyent/commit/71b43f2a12f58ef8bc5a1965a3b742749bb49231)
+### 2020 / Jun22
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 16Jun2020 | [OS-8187 port_fop_getdvp can cause a panic (#312)](https://smartos.org/bugview/OS-8187) | [2ae40291a914f65c7b5854dd1337565a84790bb9](https://github.com/joyent/illumos-joyent/commit/2ae40291a914f65c7b5854dd1337565a84790bb9)
+### 2020 / Aug03
+
+| Date | Subject | Commit |
+| ---- | ------- | ------ |
+| 6Jul2020 | [OS-8195 netlink errors have spurious flags (#316)](https://smartos.org/bugview/OS-8195) | [b55897065b152012041d04dadac63a66d8353d4d](https://github.com/joyent/illumos-joyent/commit/b55897065b152012041d04dadac63a66d8353d4d)
+| 6Jul2020 | [OS-8194 isatty() should return ENOTTY if not a TTY (#315)](https://smartos.org/bugview/OS-8194) | [2dc899462e4602db3fe0231424a247be3f28ba3d](https://github.com/joyent/illumos-joyent/commit/2dc899462e4602db3fe0231424a247be3f28ba3d)
+| 6Jul2020 | [OS-8193 OS-8181 exposed fault in lx netlink bind/sendto (#314)](https://smartos.org/bugview/OS-8193) | [2e65a908c12444547381f893857ad17321d2c75a](https://github.com/joyent/illumos-joyent/commit/2e65a908c12444547381f893857ad17321d2c75a)
